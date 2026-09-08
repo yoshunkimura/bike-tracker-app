@@ -22,6 +22,11 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev \
             libssl-dev automake
 
+      - name: Java 17を有効化
+        run: |
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
+          echo "/usr/lib/jvm/java-17-openjdk-amd64/bin" >> $GITHUB_PATH
+
       - name: pipバージョンの制約を設定
         run: |
           echo "pip<24.0" > $HOME/pip-constraints.txt
