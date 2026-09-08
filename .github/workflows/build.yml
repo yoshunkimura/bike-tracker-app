@@ -22,9 +22,15 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev \
             libssl-dev automake
 
+      - name: pipバージョンの制約を設定
+        run: |
+          echo "pip<24.0" > $HOME/pip-constraints.txt
+          echo "setuptools<70" >> $HOME/pip-constraints.txt
+          echo "PIP_CONSTRAINT=$HOME/pip-constraints.txt" >> $GITHUB_ENV
+
       - name: Buildozerをインストール
         run: |
-          pip3 install --user --upgrade 'pip<24.0' setuptools wheel
+          pip3 install --user --upgrade 'pip<24.0' 'setuptools<70' wheel
           pip3 install --user buildozer cython==0.29.36
 
       - name: APKをビルド
