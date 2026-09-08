@@ -23,7 +23,9 @@ jobs:
             libssl-dev automake
 
       - name: Buildozerをインストール
-        run: pip3 install --user buildozer cython==0.29.36
+        run: |
+          pip3 install --user --upgrade 'pip<24.0' setuptools wheel
+          pip3 install --user buildozer cython==0.29.36
 
       - name: APKをビルド
         run: |
