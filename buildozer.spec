@@ -5,7 +5,7 @@ package.name = biketracker
 package.domain = org.example
 
 source.dir = .
-source.include_exts = py,png,jpg,kv,atlas
+source.include_exts = py,png,jpg,kv,atlas,ttf
 
 version = 0.1
 

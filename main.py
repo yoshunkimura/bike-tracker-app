@@ -18,6 +18,16 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.clock import Clock
+from kivy.core.text import LabelBase
+from kivy.config import Config
+
+# 日本語フォント(Noto Sans JP)をデフォルトフォントとして登録する
+# これがないと、日本語の文字が文字化け(豆腐/□)して表示されない
+LabelBase.register(
+    name="NotoSansJP",
+    fn_regular="fonts/NotoSansJP-Regular.ttf",
+)
+Config.set("kivy", "default_font", ["NotoSansJP", "fonts/NotoSansJP-Regular.ttf"])
 
 try:
     from plyer import gps
@@ -33,6 +43,7 @@ class TrackerLayout(BoxLayout):
         self.status_label = Label(
             text="スタートボタンを押してください",
             font_size="20sp",
+            font_name="NotoSansJP",
             size_hint=(1, 0.3),
         )
         self.add_widget(self.status_label)
@@ -40,6 +51,7 @@ class TrackerLayout(BoxLayout):
         self.start_button = Button(
             text="スタート",
             font_size="24sp",
+            font_name="NotoSansJP",
             size_hint=(1, 0.35),
             background_color=(0.2, 0.6, 1, 1),
         )
@@ -49,6 +61,7 @@ class TrackerLayout(BoxLayout):
         self.stop_button = Button(
             text="ストップ",
             font_size="24sp",
+            font_name="NotoSansJP",
             size_hint=(1, 0.35),
             background_color=(1, 0.3, 0.3, 1),
         )
