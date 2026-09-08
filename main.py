@@ -261,12 +261,15 @@ class AddProfileScreen(Screen):
             self.status_label.text = f"カメラエラー: {e}"
 
     def _on_photo_taken(self, path):
-        if path and os.path.exists(path):
-            Clock.schedule_once(lambda dt: self._set_preview(path))
-        else:
-            Clock.schedule_once(
-                lambda dt: setattr(self.status_label, "text", "撮影がキャンセルされました")
-            )
+        # 端末によっては、コールバック実行時点でまだファイル書き込みが
+        # 完了していない場合があるため、少し待ってから確認する
+        def check(dt):
+            if path and os.path.exists(path):
+                self._set_preview(path)
+            else:
+                self.status_label.text = "撮影がキャンセルされました"
+
+        Clock.schedule_once(check, 0.3)
 
     def pick_from_gallery(self, instance):
         if not PLYER_AVAILABLE:
@@ -283,14 +286,24 @@ class AddProfileScreen(Screen):
             self.status_label.text = f"ギャラリーエラー: {e}"
 
     def _on_gallery_selected(self, selection):
-        if selection:
+        if selection and selection[0]:
             Clock.schedule_once(lambda dt: self._set_preview(selection[0]))
+        else:
+            Clock.schedule_once(
+                lambda dt: setattr(self.status_label, "text", "写真が選択されませんでした")
+            )
 
     def _set_preview(self, path):
-        self.selected_photo_path = path
-        self.preview_image.source = path
-        self.preview_image.reload()
-        self.status_label.text = "写真を選択しました"
+        if not path or not os.path.exists(path):
+            self.status_label.text = "写真を取得できませんでした。もう一度お試しください"
+            return
+        try:
+            self.selected_photo_path = path
+            self.preview_image.source = path
+            self.preview_image.reload()
+            self.status_label.text = "写真を選択しました"
+        except Exception as e:
+            self.status_label.text = f"プレビューエラー: {e}"
 
     def cancel(self, instance):
         self.manager.current = "profile_list"
