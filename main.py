@@ -276,6 +276,7 @@ class AddProfileScreen(Screen):
             self.status_label.text = "ギャラリー機能が利用できません(実機で確認してください)"
             return
         try:
+            print("[DEBUG] filechooser.open_fileを呼び出します")
             filechooser.open_file(
                 on_selection=self._on_gallery_selected,
                 filters=[["画像", "*.jpg", "*.jpeg", "*.png"]],
@@ -283,9 +284,11 @@ class AddProfileScreen(Screen):
         except NotImplementedError:
             self.status_label.text = "この端末ではギャラリー選択がサポートされていません"
         except Exception as e:
+            print(f"[DEBUG] filechooserで例外発生: {e}")
             self.status_label.text = f"ギャラリーエラー: {e}"
 
     def _on_gallery_selected(self, selection):
+        print(f"[DEBUG] ギャラリー選択結果(生データ): {selection!r}")
         if selection and selection[0]:
             Clock.schedule_once(lambda dt: self._set_preview(selection[0]))
         else:
@@ -294,7 +297,9 @@ class AddProfileScreen(Screen):
             )
 
     def _set_preview(self, path):
+        print(f"[DEBUG] _set_previewに渡されたpath: {path!r}")
         if not path or not os.path.exists(path):
+            print(f"[DEBUG] pathが空、またはファイルが存在しません: {path!r}")
             self.status_label.text = "写真を取得できませんでした。もう一度お試しください"
             return
         try:
@@ -303,6 +308,7 @@ class AddProfileScreen(Screen):
             self.preview_image.reload()
             self.status_label.text = "写真を選択しました"
         except Exception as e:
+            print(f"[DEBUG] プレビュー表示で例外発生: {e}")
             self.status_label.text = f"プレビューエラー: {e}"
 
     def cancel(self, instance):
@@ -450,11 +456,17 @@ class BikeTrackerApp(App):
     def on_start(self):
         try:
             from android.permissions import request_permissions, Permission
-            request_permissions([
+            perms = [
                 Permission.ACCESS_FINE_LOCATION,
                 Permission.ACCESS_COARSE_LOCATION,
                 Permission.CAMERA,
-            ])
+            ]
+            # Android のバージョンによって存在しない権限名があるため、
+            # 存在するものだけ追加する
+            for name in ("READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE"):
+                if hasattr(Permission, name):
+                    perms.append(getattr(Permission, name))
+            request_permissions(perms)
         except ImportError:
             pass
 
