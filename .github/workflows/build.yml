@@ -1,0 +1,37 @@
+name: Build Android APK
+
+# mainブランチにpushされるたびに自動でビルドを実行する
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 手動実行ボタンも使えるようにする
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: リポジトリのチェックアウト
+        uses: actions/checkout@v4
+
+      - name: 必要なシステムパッケージをインストール
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev \
+            libssl-dev automake
+
+      - name: Buildozerをインストール
+        run: pip3 install --user buildozer cython==0.29.36
+
+      - name: APKをビルド
+        run: |
+          export PATH=$PATH:$HOME/.local/bin
+          yes | buildozer android debug
+
+      - name: ビルド結果(APK)をアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: biketracker-apk
+          path: bin/*.apk
