@@ -107,6 +107,27 @@ class ProfileManager:
                 writer.writerow(["timestamp", "lat", "lon"])
         return path
 
+    def list_route_dates(self, profile_id):
+        folder = os.path.join(self.routes_dir, profile_id)
+        if not os.path.isdir(folder):
+            return []
+        dates = [f[:-4] for f in os.listdir(folder) if f.endswith(".csv")]
+        return sorted(dates, reverse=True)
+
+    def load_route_points(self, profile_id, date_str):
+        path = os.path.join(self.routes_dir, profile_id, f"{date_str}.csv")
+        points = []
+        if not os.path.exists(path):
+            return points
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    points.append((float(row["lat"]), float(row["lon"])))
+                except (KeyError, ValueError):
+                    continue
+        return points
+
 
 # ---------------------------------------------------------------
 # 画面1: プロファイル一覧
@@ -163,24 +184,35 @@ class ProfileListScreen(Screen):
         self.add_widget(root)
 
     def _build_profile_card(self, profile):
-        card = BoxLayout(orientation="vertical", size_hint_y=None, height=200)
+        card = BoxLayout(orientation="vertical", size_hint_y=None, height=230)
 
         if profile.get("photo") and os.path.exists(profile["photo"]):
-            img = KivyImage(source=profile["photo"], size_hint=(1, 0.7))
+            img = KivyImage(source=profile["photo"], size_hint=(1, 0.6))
         else:
-            img = Label(text="(写真なし)", font_name="NotoSansJP", size_hint=(1, 0.7))
+            img = Label(text="(写真なし)", font_name="NotoSansJP", size_hint=(1, 0.6))
         card.add_widget(img)
 
         name_button = Button(
             text=profile["name"],
             font_name="NotoSansJP",
             font_size="16sp",
-            size_hint=(1, 0.3),
+            size_hint=(1, 0.22),
         )
         name_button.bind(
             on_press=lambda instance, p=profile: self.go_to_tracker(p)
         )
         card.add_widget(name_button)
+
+        map_button = Button(
+            text="地図で見る",
+            font_name="NotoSansJP",
+            font_size="14sp",
+            size_hint=(1, 0.18),
+        )
+        map_button.bind(
+            on_press=lambda instance, p=profile: self.go_to_route_list(p)
+        )
+        card.add_widget(map_button)
 
         return card
 
@@ -191,6 +223,11 @@ class ProfileListScreen(Screen):
         app = App.get_running_app()
         app.selected_profile = profile
         self.manager.current = "tracker"
+
+    def go_to_route_list(self, profile):
+        app = App.get_running_app()
+        app.selected_profile = profile
+        self.manager.current = "route_list"
 
 
 # ---------------------------------------------------------------
@@ -425,6 +462,209 @@ class TrackerScreen(Screen):
 
 
 # ---------------------------------------------------------------
+# 画面4: 記録した日付の一覧(プロファイルごと)
+# ---------------------------------------------------------------
+class RouteListScreen(Screen):
+    def on_pre_enter(self, *args):
+        self.build_ui()
+
+    def build_ui(self):
+        self.clear_widgets()
+        root = BoxLayout(orientation="vertical", padding=20, spacing=15)
+
+        app = App.get_running_app()
+        profile = app.selected_profile
+        profile_name = profile["name"] if profile else "(不明)"
+
+        title = Label(
+            text=f"{profile_name} の記録一覧",
+            font_size="20sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.12),
+        )
+        root.add_widget(title)
+
+        scroll = ScrollView(size_hint=(1, 0.76))
+        box = BoxLayout(orientation="vertical", spacing=10, size_hint_y=None, padding=5)
+        box.bind(minimum_height=box.setter("height"))
+
+        dates = app.profile_manager.list_route_dates(profile["id"]) if profile else []
+
+        if not dates:
+            box.add_widget(
+                Label(
+                    text="まだ記録がありません",
+                    font_name="NotoSansJP",
+                    size_hint_y=None,
+                    height=60,
+                )
+            )
+        else:
+            for date_str in dates:
+                btn = Button(
+                    text=date_str,
+                    font_name="NotoSansJP",
+                    font_size="18sp",
+                    size_hint_y=None,
+                    height=70,
+                )
+                btn.bind(on_press=lambda instance, d=date_str: self.show_map(d))
+                box.add_widget(btn)
+
+        scroll.add_widget(box)
+        root.add_widget(scroll)
+
+        back_button = Button(
+            text="プロファイル一覧に戻る",
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.12),
+        )
+        back_button.bind(on_press=self.go_back)
+        root.add_widget(back_button)
+
+        self.add_widget(root)
+
+    def show_map(self, date_str):
+        app = App.get_running_app()
+        app.selected_route_date = date_str
+        self.manager.current = "map"
+
+    def go_back(self, instance):
+        self.manager.current = "profile_list"
+
+
+# ---------------------------------------------------------------
+# 画面5: 地図表示(Leaflet.js + OpenStreetMapをWebViewで表示)
+# ---------------------------------------------------------------
+class MapScreen(Screen):
+    def on_pre_enter(self, *args):
+        self.webview = None
+        self.build_ui()
+        self.show_map()
+
+    def on_pre_leave(self, *args):
+        self._remove_webview()
+
+    def build_ui(self):
+        self.clear_widgets()
+        root = BoxLayout(orientation="vertical", padding=10, spacing=10)
+
+        self.info_label = Label(
+            text="地図を読み込んでいます...",
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.1),
+        )
+        root.add_widget(self.info_label)
+
+        # WebViewはこのラベル部分の下に、Android側で重ねて表示する
+        spacer = BoxLayout(size_hint=(1, 0.75))
+        root.add_widget(spacer)
+
+        back_button = Button(
+            text="戻る",
+            font_name="NotoSansJP",
+            font_size="18sp",
+            size_hint=(1, 0.15),
+        )
+        back_button.bind(on_press=self.go_back)
+        root.add_widget(back_button)
+
+        self.add_widget(root)
+
+    def _build_html(self, points):
+        if not points:
+            coords_js = "[]"
+            center_js = "[35.681236, 139.767125]"  # 東京駅(データが無い場合のデフォルト)
+        else:
+            coords_js = str([[lat, lon] for lat, lon in points])
+            center_js = str(list(points[len(points) // 2]))
+
+        return f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style> html, body, #map {{ height: 100%; margin: 0; padding: 0; }} </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    var points = {coords_js};
+    var map = L.map('map').setView({center_js}, 15);
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      attribution: '&copy; OpenStreetMap contributors'
+    }}).addTo(map);
+    if (points.length > 0) {{
+      var line = L.polyline(points, {{color: 'blue', weight: 4}}).addTo(map);
+      map.fitBounds(line.getBounds());
+      L.marker(points[0]).addTo(map).bindPopup('スタート');
+      L.marker(points[points.length - 1]).addTo(map).bindPopup('ゴール');
+    }}
+  </script>
+</body>
+</html>
+"""
+
+    def show_map(self):
+        app = App.get_running_app()
+        profile = app.selected_profile
+        date_str = getattr(app, "selected_route_date", None)
+
+        if not profile or not date_str:
+            self.info_label.text = "表示する記録が選択されていません"
+            return
+
+        points = app.profile_manager.load_route_points(profile["id"], date_str)
+        self.info_label.text = f"{profile['name']} / {date_str}({len(points)}点)"
+
+        html = self._build_html(points)
+
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            WebView = autoclass("android.webkit.WebView")
+            WebViewClient = autoclass("android.webkit.WebViewClient")
+            WebSettings = autoclass("android.webkit.WebSettings")
+
+            activity = PythonActivity.mActivity
+
+            def _create_webview(dt):
+                webview = WebView(activity)
+                settings = webview.getSettings()
+                settings.setJavaScriptEnabled(True)
+                webview.setWebViewClient(WebViewClient())
+                webview.loadDataWithBaseURL(None, html, "text/html", "utf-8", None)
+                activity.addContentView(
+                    webview,
+                    autoclass("android.view.ViewGroup$LayoutParams")(-1, -1),
+                )
+                self.webview = webview
+
+            Clock.schedule_once(_create_webview, 0)
+        except Exception as e:
+            print(f"[DEBUG] WebView表示に失敗: {e}")
+            self.info_label.text = f"地図の表示に失敗しました: {e}\n(Android実機で確認してください)"
+
+    def _remove_webview(self):
+        if self.webview is not None:
+            try:
+                parent = self.webview.getParent()
+                if parent is not None:
+                    parent.removeView(self.webview)
+            except Exception as e:
+                print(f"[DEBUG] WebView削除に失敗: {e}")
+            self.webview = None
+
+    def go_back(self, instance):
+        self.manager.current = "route_list"
+
+
+# ---------------------------------------------------------------
 # アプリ本体
 # ---------------------------------------------------------------
 class BikeTrackerApp(App):
@@ -432,11 +672,14 @@ class BikeTrackerApp(App):
         self.title = "バイク記録アプリ"
         self.profile_manager = ProfileManager(self.user_data_dir)
         self.selected_profile = None
+        self.selected_route_date = None
 
         sm = ScreenManager()
         sm.add_widget(ProfileListScreen(name="profile_list"))
         sm.add_widget(AddProfileScreen(name="add_profile"))
         sm.add_widget(TrackerScreen(name="tracker"))
+        sm.add_widget(RouteListScreen(name="route_list"))
+        sm.add_widget(MapScreen(name="map"))
         return sm
 
     def on_start(self):
