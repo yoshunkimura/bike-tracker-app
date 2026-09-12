@@ -33,6 +33,12 @@ from kivy.clock import Clock
 from kivy.core.text import LabelBase
 from kivy.config import Config
 
+try:
+    from jnius import autoclass
+    ANDROID_JNIUS_AVAILABLE = True
+except Exception:
+    ANDROID_JNIUS_AVAILABLE = False
+
 # 日本語フォント(Noto Sans JP)をデフォルトフォントとして登録する
 LabelBase.register(
     name="NotoSansJP",
@@ -327,8 +333,8 @@ class TrackerScreen(Screen):
         root.add_widget(self.title_label)
 
         self.status_label = Label(
-            text="スタートボタンを押してください",
-            font_size="20sp",
+            text="スタートボタンを押してください\n(スリープ中も記録が続きます)",
+            font_size="18sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.25),
         )
@@ -365,11 +371,15 @@ class TrackerScreen(Screen):
 
         self.add_widget(root)
 
-    def start_tracking(self, instance):
-        if not PLYER_AVAILABLE:
-            self.status_label.text = "GPS機能が利用できません\n(Android実機で実行してください)"
-            return
+    def _get_service_class(self):
+        if not ANDROID_JNIUS_AVAILABLE:
+            raise RuntimeError("Android実機でのみ利用できます")
+        # buildozer.specの package.domain + package.name + "Service" + サービス名(先頭大文字)
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        service_class = autoclass("org.example.biketracker.ServiceTracker")
+        return service_class, PythonActivity.mActivity
 
+    def start_tracking(self, instance):
         app = App.get_running_app()
         if not app.selected_profile:
             self.status_label.text = "プロファイルが選択されていません"
@@ -377,41 +387,40 @@ class TrackerScreen(Screen):
 
         self.route_file_path = app.profile_manager.route_file_for(app.selected_profile["id"])
 
+        # サービス側に「どのファイルに保存するか」を伝えるための状態ファイルを書く
+        state_file = os.path.join(app.user_data_dir, "service_state.json")
         try:
-            gps.configure(on_location=self.on_location, on_status=self.on_status)
-            gps.start(minTime=1000, minDistance=1)
-            self.tracking = True
-            self.status_label.text = "記録開始しました...\n座標取得を待っています"
-        except NotImplementedError:
-            self.status_label.text = "この端末ではGPSがサポートされていません"
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump({"route_file": self.route_file_path}, f, ensure_ascii=False)
         except Exception as e:
-            self.status_label.text = f"エラー: {e}"
+            self.status_label.text = f"状態ファイルの書き込みに失敗: {e}"
+            return
+
+        try:
+            service_class, mactivity = self._get_service_class()
+            service_class.start(mactivity, "")
+            self.tracking = True
+            self.status_label.text = (
+                "バックグラウンドで記録中です\n(通知バーを確認してください)"
+            )
+        except Exception as e:
+            print(f"[DEBUG] サービス起動に失敗: {e}")
+            self.status_label.text = f"サービス起動エラー: {e}"
 
     def stop_tracking(self, instance):
-        if PLYER_AVAILABLE and self.tracking:
-            gps.stop()
-            self.tracking = False
-            self.status_label.text = "記録を停止しました"
-
-    def on_location(self, **kwargs):
-        lat = kwargs.get("lat")
-        lon = kwargs.get("lon")
-        self.status_label.text = f"緯度: {lat}\n経度: {lon}"
-
-        if self.route_file_path and lat is not None and lon is not None:
-            try:
-                with open(self.route_file_path, "a", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([datetime.now().isoformat(), lat, lon])
-            except Exception as e:
-                print(f"座標の保存に失敗しました: {e}")
-
-    def on_status(self, stype, status):
-        print(f"GPS status: {stype} - {status}")
+        if not self.tracking:
+            return
+        try:
+            service_class, mactivity = self._get_service_class()
+            service_class.stop(mactivity)
+        except Exception as e:
+            print(f"[DEBUG] サービス停止に失敗: {e}")
+        self.tracking = False
+        self.status_label.text = "記録を停止しました"
 
     def go_back(self, instance):
-        if self.tracking:
-            self.stop_tracking(None)
+        # 記録中でも、バックグラウンドで動き続けさせたいので
+        # ここではサービスを止めずに画面だけ戻る
         self.manager.current = "profile_list"
 
 
@@ -439,12 +448,22 @@ class BikeTrackerApp(App):
             ]
             # Android のバージョンによって存在しない権限名があるため、
             # 存在するものだけ追加する
-            for name in ("READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE"):
+            for name in ("READ_MEDIA_IMAGES", "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE", "POST_NOTIFICATIONS"):
                 if hasattr(Permission, name):
                     perms.append(getattr(Permission, name))
-            request_permissions(perms)
+            request_permissions(perms, self._on_permissions_result)
         except ImportError:
             pass
+
+    def _on_permissions_result(self, permissions, grants):
+        # バックグラウンド位置情報は、前景の位置情報が許可された後でないと
+        # Androidがダイアログを出さない仕様のため、別途あとからリクエストする
+        try:
+            from android.permissions import request_permissions, Permission
+            if hasattr(Permission, "ACCESS_BACKGROUND_LOCATION"):
+                request_permissions([Permission.ACCESS_BACKGROUND_LOCATION])
+        except Exception as e:
+            print(f"[DEBUG] バックグラウンド位置情報の権限リクエストに失敗: {e}")
 
 
 if __name__ == "__main__":

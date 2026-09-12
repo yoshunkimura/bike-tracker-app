@@ -14,9 +14,11 @@ requirements = python3,kivy,plyer
 orientation = portrait
 fullscreen = 0
 
-# ステップ2: プロファイル写真のためカメラ・ギャラリー権限を追加。
-# 次のステップ(バックグラウンド記録)で FOREGROUND_SERVICE 等を追加予定。
-android.permissions = ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,READ_MEDIA_IMAGES,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+# ステップ3: バックグラウンド記録のため FOREGROUND_SERVICE 等を追加。
+android.permissions = ACCESS_FINE_LOCATION,ACCESS_COARSE_LOCATION,ACCESS_BACKGROUND_LOCATION,FOREGROUND_SERVICE,FOREGROUND_SERVICE_LOCATION,POST_NOTIFICATIONS,READ_MEDIA_IMAGES,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+
+# バックグラウンドでGPS記録を続けるためのフォアグラウンドサービス
+services = tracker:service.py:foreground
 
 android.api = 33
 android.build_tools_version = 33.0.2
