@@ -254,7 +254,7 @@ class AddProfileScreen(Screen):
         app = App.get_running_app()
         photo_path = os.path.join(app.user_data_dir, f"tmp_camera_{uuid.uuid4().hex}.jpg")
         try:
-            camera.take_photo(filename=photo_path, on_complete=self._on_photo_taken)
+            camera.take_picture(filename=photo_path, on_complete=self._on_photo_taken)
         except NotImplementedError:
             self.status_label.text = "この端末ではカメラがサポートされていません"
         except Exception as e:
