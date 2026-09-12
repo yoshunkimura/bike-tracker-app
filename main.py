@@ -41,7 +41,7 @@ LabelBase.register(
 Config.set("kivy", "default_font", ["NotoSansJP", "fonts/NotoSansJP-Regular.ttf"])
 
 try:
-    from plyer import gps, camera, filechooser
+    from plyer import gps, filechooser
     PLYER_AVAILABLE = True
 except Exception:
     PLYER_AVAILABLE = False
@@ -220,11 +220,12 @@ class AddProfileScreen(Screen):
         root.add_widget(self.preview_image)
 
         photo_buttons = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
-        camera_button = Button(text="写真を撮影", font_name="NotoSansJP", font_size="16sp")
-        camera_button.bind(on_press=self.take_photo)
-        gallery_button = Button(text="ギャラリーから選択", font_name="NotoSansJP", font_size="16sp")
+        gallery_button = Button(
+            text="写真を選択(ギャラリーから)",
+            font_name="NotoSansJP",
+            font_size="16sp",
+        )
         gallery_button.bind(on_press=self.pick_from_gallery)
-        photo_buttons.add_widget(camera_button)
         photo_buttons.add_widget(gallery_button)
         root.add_widget(photo_buttons)
 
@@ -246,41 +247,6 @@ class AddProfileScreen(Screen):
         root.add_widget(bottom_buttons)
 
         self.add_widget(root)
-
-    def take_photo(self, instance):
-        if not PLYER_AVAILABLE:
-            self.status_label.text = "カメラ機能が利用できません(実機で確認してください)"
-            return
-
-        # Android 7以降、アプリ内部のファイルをそのままカメラアプリに渡すと
-        # FileUriExposedExceptionで落ちるため、StrictModeの該当チェックを緩和する
-        try:
-            from jnius import autoclass
-            StrictMode = autoclass("android.os.StrictMode")
-            VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
-            StrictMode.setVmPolicy(VmPolicyBuilder().build())
-        except Exception as e:
-            print(f"[DEBUG] StrictMode回避に失敗(無視して続行): {e}")
-
-        app = App.get_running_app()
-        photo_path = os.path.join(app.user_data_dir, f"tmp_camera_{uuid.uuid4().hex}.jpg")
-        try:
-            camera.take_picture(filename=photo_path, on_complete=self._on_photo_taken)
-        except NotImplementedError:
-            self.status_label.text = "この端末ではカメラがサポートされていません"
-        except Exception as e:
-            self.status_label.text = f"カメラエラー: {e}"
-
-    def _on_photo_taken(self, path):
-        # 端末によっては、コールバック実行時点でまだファイル書き込みが
-        # 完了していない場合があるため、少し待ってから確認する
-        def check(dt):
-            if path and os.path.exists(path):
-                self._set_preview(path)
-            else:
-                self.status_label.text = "撮影がキャンセルされました"
-
-        Clock.schedule_once(check, 0.3)
 
     def pick_from_gallery(self, instance):
         if not PLYER_AVAILABLE:
@@ -470,7 +436,6 @@ class BikeTrackerApp(App):
             perms = [
                 Permission.ACCESS_FINE_LOCATION,
                 Permission.ACCESS_COARSE_LOCATION,
-                Permission.CAMERA,
             ]
             # Android のバージョンによって存在しない権限名があるため、
             # 存在するものだけ追加する
