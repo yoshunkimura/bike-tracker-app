@@ -251,6 +251,17 @@ class AddProfileScreen(Screen):
         if not PLYER_AVAILABLE:
             self.status_label.text = "カメラ機能が利用できません(実機で確認してください)"
             return
+
+        # Android 7以降、アプリ内部のファイルをそのままカメラアプリに渡すと
+        # FileUriExposedExceptionで落ちるため、StrictModeの該当チェックを緩和する
+        try:
+            from jnius import autoclass
+            StrictMode = autoclass("android.os.StrictMode")
+            VmPolicyBuilder = autoclass("android.os.StrictMode$VmPolicy$Builder")
+            StrictMode.setVmPolicy(VmPolicyBuilder().build())
+        except Exception as e:
+            print(f"[DEBUG] StrictMode回避に失敗(無視して続行): {e}")
+
         app = App.get_running_app()
         photo_path = os.path.join(app.user_data_dir, f"tmp_camera_{uuid.uuid4().hex}.jpg")
         try:
