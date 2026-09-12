@@ -626,26 +626,26 @@ class MapScreen(Screen):
 
         try:
             from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             WebView = autoclass("android.webkit.WebView")
             WebViewClient = autoclass("android.webkit.WebViewClient")
-            WebSettings = autoclass("android.webkit.WebSettings")
+            LayoutParams = autoclass("android.view.ViewGroup$LayoutParams")
 
             activity = PythonActivity.mActivity
 
-            def _create_webview(dt):
+            @run_on_ui_thread
+            def _create_webview():
                 webview = WebView(activity)
                 settings = webview.getSettings()
                 settings.setJavaScriptEnabled(True)
                 webview.setWebViewClient(WebViewClient())
                 webview.loadDataWithBaseURL(None, html, "text/html", "utf-8", None)
-                activity.addContentView(
-                    webview,
-                    autoclass("android.view.ViewGroup$LayoutParams")(-1, -1),
-                )
+                activity.addContentView(webview, LayoutParams(-1, -1))
                 self.webview = webview
 
-            Clock.schedule_once(_create_webview, 0)
+            _create_webview()
         except Exception as e:
             print(f"[DEBUG] WebView表示に失敗: {e}")
             self.info_label.text = f"地図の表示に失敗しました: {e}\n(Android実機で確認してください)"
@@ -653,9 +653,17 @@ class MapScreen(Screen):
     def _remove_webview(self):
         if self.webview is not None:
             try:
-                parent = self.webview.getParent()
-                if parent is not None:
-                    parent.removeView(self.webview)
+                from android.runnable import run_on_ui_thread
+
+                webview = self.webview
+
+                @run_on_ui_thread
+                def _remove():
+                    parent = webview.getParent()
+                    if parent is not None:
+                        parent.removeView(webview)
+
+                _remove()
             except Exception as e:
                 print(f"[DEBUG] WebView削除に失敗: {e}")
             self.webview = None
