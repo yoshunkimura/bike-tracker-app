@@ -30,6 +30,7 @@ from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.image import Image as KivyImage
 from kivy.clock import Clock
+from kivy.core.window import Window
 from kivy.core.text import LabelBase
 from kivy.config import Config
 
@@ -542,44 +543,43 @@ class MapScreen(Screen):
         self.webview = None
         self.build_ui()
         self.show_map()
+        Window.bind(on_keyboard=self._on_keyboard)
 
     def on_pre_leave(self, *args):
+        Window.unbind(on_keyboard=self._on_keyboard)
         self._remove_webview()
+
+    def _on_keyboard(self, window, key, *args):
+        # key=27 はAndroidの「戻る」ボタン/ジェスチャー
+        if key == 27:
+            self.go_back(None)
+            return True
+        return False
 
     def build_ui(self):
         self.clear_widgets()
         root = BoxLayout(orientation="vertical", padding=10, spacing=10)
 
         self.info_label = Label(
-            text="地図を読み込んでいます...",
+            text="地図を読み込んでいます...\n(表示中は端末の「戻る」操作で一覧に戻れます)",
             font_name="NotoSansJP",
             font_size="16sp",
-            size_hint=(1, 0.1),
+            size_hint=(1, 1),
         )
         root.add_widget(self.info_label)
 
-        # WebViewはこのラベル部分の下に、Android側で重ねて表示する
-        spacer = BoxLayout(size_hint=(1, 0.75))
-        root.add_widget(spacer)
-
-        back_button = Button(
-            text="戻る",
-            font_name="NotoSansJP",
-            font_size="18sp",
-            size_hint=(1, 0.15),
-        )
-        back_button.bind(on_press=self.go_back)
-        root.add_widget(back_button)
-
         self.add_widget(root)
 
-    def _build_html(self, points):
+    def _build_html(self, points, info_text=""):
         if not points:
             coords_js = "[]"
             center_js = "[35.681236, 139.767125]"  # 東京駅(データが無い場合のデフォルト)
+            banner = "座標が記録されていません(記録時間が短すぎた可能性があります)"
         else:
             coords_js = str([[lat, lon] for lat, lon in points])
-            center_js = str(list(points[len(points) // 2]))
+            # 記録を開始した地点(先頭の座標)を中心にする
+            center_js = str(list(points[0]))
+            banner = info_text
 
         return f"""
 <!DOCTYPE html>
@@ -588,10 +588,24 @@ class MapScreen(Screen):
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-  <style> html, body, #map {{ height: 100%; margin: 0; padding: 0; }} </style>
+  <style>
+    html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
+    #banner {{
+      position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(0,0,0,0.6); color: white; padding: 8px;
+      font-size: 14px; text-align: center;
+    }}
+    #back-hint {{
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000;
+      background: rgba(0,0,0,0.6); color: white; padding: 8px;
+      font-size: 13px; text-align: center;
+    }}
+  </style>
 </head>
 <body>
+  <div id="banner">{banner}</div>
   <div id="map"></div>
+  <div id="back-hint">端末の「戻る」操作でプロファイル一覧に戻ります</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     var points = {coords_js};
@@ -610,6 +624,7 @@ class MapScreen(Screen):
 </html>
 """
 
+
     def show_map(self):
         app = App.get_running_app()
         profile = app.selected_profile
@@ -620,9 +635,10 @@ class MapScreen(Screen):
             return
 
         points = app.profile_manager.load_route_points(profile["id"], date_str)
-        self.info_label.text = f"{profile['name']} / {date_str}({len(points)}点)"
+        info_text = f"{profile['name']} / {date_str}({len(points)}点)"
+        self.info_label.text = info_text
 
-        html = self._build_html(points)
+        html = self._build_html(points, info_text)
 
         try:
             from jnius import autoclass
