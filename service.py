@@ -60,11 +60,21 @@ class LocationListener(PythonJavaClass):
         super().__init__()
         self.route_file = route_file
 
-    @java_method("(Landroid/location/Location;)V")
-    def onLocationChanged(self, location):
+    @java_method("(Landroid/location/Location;)V", name="onLocationChanged")
+    def onLocationChanged_single(self, location):
         lat = location.getLatitude()
         lon = location.getLongitude()
         append_point(self.route_file, lat, lon)
+
+    @java_method("(Ljava/util/List;)V", name="onLocationChanged")
+    def onLocationChanged_batch(self, locations):
+        # Android 12以降、位置情報がリストでまとめて届く場合がある
+        count = locations.size()
+        for i in range(count):
+            location = locations.get(i)
+            lat = location.getLatitude()
+            lon = location.getLongitude()
+            append_point(self.route_file, lat, lon)
 
     @java_method("(Ljava/lang/String;)V")
     def onProviderDisabled(self, provider):
