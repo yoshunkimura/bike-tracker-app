@@ -732,7 +732,7 @@ class MapScreen(Screen):
     html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
     #banner {{
       position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-      background: rgba(0,0,0,0.6); color: white; padding: 8px 8px 8px 130px;
+      background: rgba(0,0,0,0.6); color: white; padding: 8px;
       font-size: 14px; text-align: left;
     }}
   </style>
@@ -799,6 +799,7 @@ class MapScreen(Screen):
 
                 @java_method("(Landroid/view/View;)V")
                 def onClick(self, view):
+                    print("[DEBUG] 戻るボタンのonClickが呼ばれました")
                     self.callback()
 
             @run_on_ui_thread
@@ -811,7 +812,7 @@ class MapScreen(Screen):
                 activity.addContentView(webview, LayoutParams(-1, -1))
                 self.webview = webview
 
-                # 地図の上に重ねて表示する「戻る」ボタン(左上、邪魔にならない位置)
+                # 地図の上に重ねて表示する「戻る」ボタン(左下、ズームボタンと重ならない位置)
                 density = activity.getResources().getDisplayMetrics().density
                 def dp(v):
                     return int(v * density)
@@ -822,16 +823,20 @@ class MapScreen(Screen):
                 back_button.setTextColor(Color.WHITE)
                 back_button.setBackgroundColor(Color.parseColor("#CC1976D2"))
                 back_button.setAllCaps(False)
+                back_button.setClickable(True)
+                back_button.setFocusable(True)
+                back_button.setElevation(dp(8))
 
                 self._back_click_listener = OnClickListener(
                     lambda: Clock.schedule_once(lambda dt: self.go_back(None))
                 )
                 back_button.setOnClickListener(self._back_click_listener)
 
-                params = FrameLayoutParams(dp(110), dp(48))
-                params.gravity = Gravity.TOP | Gravity.LEFT
-                params.setMargins(dp(12), dp(40), 0, 0)
+                params = FrameLayoutParams(dp(120), dp(56))
+                params.gravity = Gravity.BOTTOM | Gravity.LEFT
+                params.setMargins(dp(16), 0, 0, dp(24))
                 activity.addContentView(back_button, params)
+                back_button.bringToFront()
                 self.back_button_native = back_button
 
             _create_webview()
