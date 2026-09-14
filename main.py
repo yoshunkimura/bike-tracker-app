@@ -851,7 +851,10 @@ class MapScreen(Screen):
         ]
         if any(v is not None for v in views_to_remove):
             try:
+                from jnius import autoclass, cast
                 from android.runnable import run_on_ui_thread
+
+                ViewGroup = autoclass("android.view.ViewGroup")
 
                 @run_on_ui_thread
                 def _remove():
@@ -859,7 +862,7 @@ class MapScreen(Screen):
                         if v is not None:
                             parent = v.getParent()
                             if parent is not None:
-                                parent.removeView(v)
+                                cast(ViewGroup, parent).removeView(v)
 
                 _remove()
             except Exception as e:
