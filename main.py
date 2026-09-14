@@ -20,6 +20,7 @@ import uuid
 import csv
 import math
 import calendar
+import base64
 from datetime import datetime, timezone, timedelta
 
 from kivy.app import App
@@ -167,6 +168,14 @@ TRANSLATIONS = {
         "calendar_no_data": "この期間の記録がありません",
         "range_distance_result": "{start} 〜 {end}\n走行距離: {distance} km",
         "close_button": "閉じる",
+        "add_pin_button": "ここにピンを立てる",
+        "getting_location": "位置情報を取得中...",
+        "location_failed": "位置情報の取得に失敗しました",
+        "add_pin_title": "ピンを追加",
+        "pin_location_label": "緯度: {lat}\n経度: {lon}",
+        "pin_text_hint": "メモ(例: ここで休憩した)",
+        "map_add_pin_button": "+ ピン",
+        "map_pin_getting_location": "地図の中心位置を取得中...",
     },
     "en": {
         "profile_list_title": "Select Profile",
@@ -223,6 +232,14 @@ TRANSLATIONS = {
         "calendar_no_data": "No records in this date range",
         "range_distance_result": "{start} - {end}\nDistance: {distance} km",
         "close_button": "Close",
+        "add_pin_button": "Add Pin Here",
+        "getting_location": "Getting location...",
+        "location_failed": "Failed to get location",
+        "add_pin_title": "Add Pin",
+        "pin_location_label": "Lat: {lat}\nLon: {lon}",
+        "pin_text_hint": "Memo (e.g. rested here)",
+        "map_add_pin_button": "+ Pin",
+        "map_pin_getting_location": "Getting map center...",
     },
 }
 
@@ -373,6 +390,90 @@ class ProfileManager:
             if points:
                 segments.append(points)
         return segments
+
+
+# ---------------------------------------------------------------
+# データ管理: ピン(地図上の写真付きマーカー)の保存・読み込み
+# ---------------------------------------------------------------
+class PinManager:
+    MAX_PHOTO_SIZE = 800  # 縦横の最大ピクセル数(それ以上は縮小する)
+    JPEG_QUALITY = 75
+
+    def __init__(self, base_dir):
+        self.base_dir = base_dir
+        self.pins_dir = os.path.join(base_dir, "pins")
+        self.photos_dir = os.path.join(base_dir, "pin_photos")
+        os.makedirs(self.pins_dir, exist_ok=True)
+        os.makedirs(self.photos_dir, exist_ok=True)
+
+    def _pins_file(self, profile_id):
+        return os.path.join(self.pins_dir, f"{profile_id}.json")
+
+    def load_pins(self, profile_id):
+        path = self._pins_file(profile_id)
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return []
+
+    def _save_pins(self, profile_id, pins):
+        with open(self._pins_file(profile_id), "w", encoding="utf-8") as f:
+            json.dump(pins, f, ensure_ascii=False, indent=2)
+
+    def _store_photo(self, pin_id, photo_source_path):
+        """写真を縮小してアプリ専用フォルダに保存し、保存先のパスを返す"""
+        dest_path = os.path.join(self.photos_dir, f"{pin_id}.jpg")
+        try:
+            from PIL import Image as PILImage
+
+            img = PILImage.open(photo_source_path)
+            img = img.convert("RGB")
+            img.thumbnail((self.MAX_PHOTO_SIZE, self.MAX_PHOTO_SIZE))
+            img.save(dest_path, "JPEG", quality=self.JPEG_QUALITY)
+            return dest_path
+        except Exception as e:
+            print(f"[DEBUG] 写真の縮小保存に失敗、元ファイルをそのままコピーします: {e}")
+            try:
+                with open(photo_source_path, "rb") as src, open(dest_path, "wb") as dst:
+                    dst.write(src.read())
+                return dest_path
+            except Exception as e2:
+                print(f"[DEBUG] 写真のコピーにも失敗: {e2}")
+                return None
+
+    def add_pin(self, profile_id, lat, lon, text, photo_source_path=None):
+        pin_id = str(uuid.uuid4())
+        stored_photo = None
+        if photo_source_path and os.path.exists(photo_source_path):
+            stored_photo = self._store_photo(pin_id, photo_source_path)
+
+        pin = {
+            "id": pin_id,
+            "lat": lat,
+            "lon": lon,
+            "text": text,
+            "photo": stored_photo,
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        pins = self.load_pins(profile_id)
+        pins.append(pin)
+        self._save_pins(profile_id, pins)
+        return pin
+
+    def photo_as_data_uri(self, pin):
+        photo = pin.get("photo")
+        if not photo or not os.path.exists(photo):
+            return None
+        try:
+            with open(photo, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+        except Exception as e:
+            print(f"[DEBUG] 写真のbase64変換に失敗: {e}")
+            return None
 
 
 # ---------------------------------------------------------------
@@ -610,6 +711,135 @@ class AddProfileScreen(Screen):
 
 
 # ---------------------------------------------------------------
+# 画面: ピンを追加(緯度経度はあらかじめapp.pending_pin_locationに設定しておく)
+# ---------------------------------------------------------------
+class AddPinScreen(Screen):
+    def on_pre_enter(self, *args):
+        self.selected_photo_path = None
+        self.build_ui()
+
+    def build_ui(self):
+        self.clear_widgets()
+        app = App.get_running_app()
+        root = BoxLayout(orientation="vertical", padding=20, spacing=15)
+
+        title = Label(
+            text=app.tr("add_pin_title"),
+            font_size="22sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.1),
+        )
+        root.add_widget(title)
+
+        lat, lon = getattr(app, "pending_pin_location", (None, None))
+        location_label = Label(
+            text=app.tr("pin_location_label", lat=lat, lon=lon),
+            font_name="NotoSansJP",
+            font_size="14sp",
+            size_hint=(1, 0.12),
+        )
+        root.add_widget(location_label)
+
+        self.text_input = TextInput(
+            hint_text=app.tr("pin_text_hint"),
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.15),
+            multiline=True,
+        )
+        root.add_widget(self.text_input)
+
+        self.preview_image = KivyImage(size_hint=(1, 0.33))
+        root.add_widget(self.preview_image)
+
+        gallery_button = Button(
+            text=app.tr("gallery_button"),
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.1),
+        )
+        gallery_button.bind(on_press=self.pick_from_gallery)
+        root.add_widget(gallery_button)
+
+        self.status_label = Label(text="", font_name="NotoSansJP", size_hint=(1, 0.08))
+        root.add_widget(self.status_label)
+
+        bottom_buttons = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
+        cancel_button = Button(text=app.tr("cancel_button"), font_name="NotoSansJP", font_size="16sp")
+        cancel_button.bind(on_press=self.cancel)
+        save_button = Button(
+            text=app.tr("save_button"),
+            font_name="NotoSansJP",
+            font_size="18sp",
+            background_color=(0.2, 0.6, 1, 1),
+        )
+        save_button.bind(on_press=self.save_pin)
+        bottom_buttons.add_widget(cancel_button)
+        bottom_buttons.add_widget(save_button)
+        root.add_widget(bottom_buttons)
+
+        self.add_widget(root)
+
+    def pick_from_gallery(self, instance):
+        app = App.get_running_app()
+        if not PLYER_AVAILABLE:
+            self.status_label.text = app.tr("gallery_unavailable")
+            return
+        try:
+            filechooser.open_file(
+                on_selection=self._on_gallery_selected,
+                filters=[["画像", "*.jpg", "*.jpeg", "*.png"]],
+            )
+        except NotImplementedError:
+            self.status_label.text = app.tr("gallery_not_supported")
+        except Exception as e:
+            self.status_label.text = app.tr("gallery_error", error=e)
+
+    def _on_gallery_selected(self, selection):
+        app = App.get_running_app()
+        if selection and selection[0]:
+            Clock.schedule_once(lambda dt: self._set_preview(selection[0]))
+        else:
+            Clock.schedule_once(
+                lambda dt: setattr(self.status_label, "text", app.tr("photo_not_selected"))
+            )
+
+    def _set_preview(self, path):
+        app = App.get_running_app()
+        if not path or not os.path.exists(path):
+            self.status_label.text = app.tr("photo_get_failed")
+            return
+        try:
+            self.selected_photo_path = path
+            self.preview_image.source = path
+            self.preview_image.reload()
+            self.status_label.text = app.tr("photo_selected")
+        except Exception as e:
+            self.status_label.text = app.tr("preview_error", error=e)
+
+    def save_pin(self, instance):
+        app = App.get_running_app()
+        profile = app.selected_profile
+        lat, lon = getattr(app, "pending_pin_location", (None, None))
+        if not profile or lat is None or lon is None:
+            self.status_label.text = app.tr("location_failed")
+            return
+
+        app.pin_manager.add_pin(
+            profile["id"], lat, lon, self.text_input.text.strip(), self.selected_photo_path
+        )
+        self._return_to_source()
+
+    def cancel(self, instance):
+        self._return_to_source()
+
+    def _return_to_source(self):
+        app = App.get_running_app()
+        source = getattr(app, "pending_pin_source", "map")
+        self.manager.current = "tracker" if source == "tracker" else "map"
+
+
+# ---------------------------------------------------------------
 # 画面3: GPS記録画面(プロファイルごとにファイルへ保存)
 # ---------------------------------------------------------------
 class TrackerScreen(Screen):
@@ -637,7 +867,7 @@ class TrackerScreen(Screen):
             text=app.tr("tracker_status_initial"),
             font_size="18sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.25),
+            size_hint=(1, 0.2),
         )
         root.add_widget(self.status_label)
 
@@ -645,7 +875,7 @@ class TrackerScreen(Screen):
             text=app.tr("start_button"),
             font_size="24sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.2),
+            size_hint=(1, 0.17),
             background_color=(0.2, 0.6, 1, 1),
         )
         self.start_button.bind(on_press=self.start_tracking)
@@ -655,11 +885,21 @@ class TrackerScreen(Screen):
             text=app.tr("stop_button"),
             font_size="24sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.2),
+            size_hint=(1, 0.17),
             background_color=(1, 0.3, 0.3, 1),
         )
         self.stop_button.bind(on_press=self.stop_tracking)
         root.add_widget(self.stop_button)
+
+        self.add_pin_button = Button(
+            text=app.tr("add_pin_button"),
+            font_size="18sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.15),
+            background_color=(0.9, 0.6, 0.1, 1),
+        )
+        self.add_pin_button.bind(on_press=self.add_pin_here)
+        root.add_widget(self.add_pin_button)
 
         back_button = Button(
             text=app.tr("back_to_profile_list"),
@@ -717,6 +957,44 @@ class TrackerScreen(Screen):
             print(f"[DEBUG] サービス停止に失敗: {e}")
         self.tracking = False
         self.status_label.text = app.tr("tracking_stopped")
+
+    def add_pin_here(self, instance):
+        app = App.get_running_app()
+        if not app.selected_profile:
+            self.status_label.text = app.tr("no_profile_selected")
+            return
+        if not PLYER_AVAILABLE:
+            self.status_label.text = app.tr("location_failed")
+            return
+
+        self.status_label.text = app.tr("getting_location")
+        try:
+            gps.configure(on_location=self._on_pin_location, on_status=lambda *a: None)
+            gps.start(minTime=1000, minDistance=0)
+        except Exception as e:
+            print(f"[DEBUG] ピン用GPS取得に失敗: {e}")
+            self.status_label.text = app.tr("location_failed")
+
+    def _on_pin_location(self, **kwargs):
+        lat = kwargs.get("lat")
+        lon = kwargs.get("lon")
+        try:
+            gps.stop()
+        except Exception:
+            pass
+        if lat is None or lon is None:
+            Clock.schedule_once(
+                lambda dt: setattr(self.status_label, "text", App.get_running_app().tr("location_failed"))
+            )
+            return
+
+        def _go_to_add_pin(dt):
+            app = App.get_running_app()
+            app.pending_pin_location = (lat, lon)
+            app.pending_pin_source = "tracker"
+            self.manager.current = "add_pin"
+
+        Clock.schedule_once(_go_to_add_pin)
 
     def go_back(self, instance):
         # 記録中でも、バックグラウンドで動き続けさせたいので
@@ -827,6 +1105,7 @@ class MapScreen(Screen):
     def on_pre_enter(self, *args):
         self.webview = None
         self.back_button_native = None
+        self.pin_button_native = None
         self.build_ui()
         self.show_map()
         Window.bind(on_keyboard=self._on_keyboard)
@@ -857,11 +1136,13 @@ class MapScreen(Screen):
 
         self.add_widget(root)
 
-    def _build_html(self, segments_with_time, info_text="", total_distance_km=0.0):
+    def _build_html(self, segments_with_time, info_text="", total_distance_km=0.0, pins=None):
         """
         segments_with_time: [[(time_label, lat, lon), ...], ...] (日付ごとのリストのリスト)
+        pins: [{"lat":.., "lon":.., "text":.., "photo_data_uri": ".." or None}, ...]
         """
         app = App.get_running_app()
+        pins = pins or []
         has_points = any(len(seg) > 0 for seg in segments_with_time)
 
         if not has_points:
@@ -877,6 +1158,18 @@ class MapScreen(Screen):
             center_js = str([first_seg[0][1], first_seg[0][2]])
             banner = f"{info_text} - {total_distance_km:.1f} km"
 
+        # ピンをJavaScriptオブジェクトの配列として埋め込む(json.dumpsでエスケープを安全に行う)
+        pins_data = [
+            {
+                "lat": p["lat"],
+                "lon": p["lon"],
+                "text": p.get("text") or "",
+                "photo": p.get("photo_data_uri"),
+            }
+            for p in pins
+        ]
+        pins_js = json.dumps(pins_data, ensure_ascii=False)
+
         return f"""
 <!DOCTYPE html>
 <html>
@@ -891,6 +1184,8 @@ class MapScreen(Screen):
       background: rgba(0,0,0,0.6); color: white; padding: 8px;
       font-size: 14px; text-align: left;
     }}
+    .pin-popup img {{ max-width: 200px; max-height: 200px; display: block; margin-bottom: 6px; }}
+    .pin-popup p {{ margin: 0; white-space: pre-wrap; }}
   </style>
 </head>
 <body>
@@ -899,6 +1194,7 @@ class MapScreen(Screen):
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     var segments = {segments_js};
+    var pins = {pins_js};
     var map = L.map('map').setView({center_js}, 15);
     // キャッシュを使わず常に最新のタイルを取得する
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png?t=' + Date.now(), {{
@@ -932,6 +1228,23 @@ class MapScreen(Screen):
 
       L.marker(latlngs[0]).addTo(map).bindPopup('Start: ' + seg[0][2]);
       L.marker(latlngs[latlngs.length - 1]).addTo(map).bindPopup('End: ' + seg[seg.length - 1][2]);
+    }});
+
+    // ピン(写真付きマーカー)を描画する
+    var pinIcon = L.icon({{
+      iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+      shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+      iconSize: [30, 46], iconAnchor: [15, 46]
+    }});
+    pins.forEach(function(pin) {{
+      var marker = L.marker([pin.lat, pin.lon], {{icon: pinIcon}}).addTo(map);
+      var html = '<div class="pin-popup">';
+      if (pin.photo) {{
+        html += '<img src="' + pin.photo + '">';
+      }}
+      html += '<p>' + (pin.text || '') + '</p></div>';
+      marker.bindPopup(html);
+      allBounds.push(L.latLngBounds([[pin.lat, pin.lon]]));
     }});
 
     if (allBounds.length > 0) {{
@@ -972,7 +1285,20 @@ class MapScreen(Screen):
             for seg in segments_with_time
         ]
 
-        html = self._build_html(segments_local_time, info_text, total_km)
+        # ピン(写真付きマーカー)を読み込み、写真はbase64に変換してHTMLに埋め込む
+        raw_pins = app.pin_manager.load_pins(profile["id"])
+        pins = []
+        for p in raw_pins:
+            pins.append(
+                {
+                    "lat": p["lat"],
+                    "lon": p["lon"],
+                    "text": p.get("text", ""),
+                    "photo_data_uri": app.pin_manager.photo_as_data_uri(p),
+                }
+            )
+
+        html = self._build_html(segments_local_time, info_text, total_km, pins)
 
         try:
             from jnius import autoclass, PythonJavaClass, java_method
@@ -999,8 +1325,20 @@ class MapScreen(Screen):
 
                 @java_method("(Landroid/view/View;)V")
                 def onClick(self, view):
-                    print("[DEBUG] 戻るボタンのonClickが呼ばれました")
+                    print("[DEBUG] ボタンのonClickが呼ばれました")
                     self.callback()
+
+            class MapCenterCallback(PythonJavaClass):
+                __javainterfaces__ = ["android/webkit/ValueCallback"]
+                __javacontext__ = "app"
+
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+
+                @java_method("(Ljava/lang/Object;)V")
+                def onReceiveValue(self, value):
+                    self.callback(str(value))
 
             @run_on_ui_thread
             def _create_webview():
@@ -1017,8 +1355,9 @@ class MapScreen(Screen):
                 def dp(v):
                     return int(v * density)
 
-                back_button = AndroidButton(activity)
                 JString = autoclass("java.lang.String")
+
+                back_button = AndroidButton(activity)
                 back_button.setText(JString(app.tr("map_back_button")))
                 back_button.setTextColor(Color.WHITE)
                 back_button.setBackgroundColor(Color.parseColor("#CC1976D2"))
@@ -1032,22 +1371,89 @@ class MapScreen(Screen):
                 )
                 back_button.setOnClickListener(self._back_click_listener)
 
-                params = FrameLayoutParams(dp(120), dp(56))
-                params.gravity = Gravity.BOTTOM | Gravity.LEFT
-                params.setMargins(dp(16), 0, 0, dp(24))
-                activity.addContentView(back_button, params)
+                back_params = FrameLayoutParams(dp(120), dp(56))
+                back_params.gravity = Gravity.BOTTOM | Gravity.LEFT
+                back_params.setMargins(dp(16), 0, 0, dp(24))
+                activity.addContentView(back_button, back_params)
                 back_button.bringToFront()
                 self.back_button_native = back_button
+
+                # 地図の上に重ねて表示する「＋ピン」ボタン(右下)
+                pin_button = AndroidButton(activity)
+                pin_button.setText(JString(app.tr("map_add_pin_button")))
+                pin_button.setTextColor(Color.WHITE)
+                pin_button.setBackgroundColor(Color.parseColor("#CC9C6B0A"))
+                pin_button.setAllCaps(False)
+                pin_button.setClickable(True)
+                pin_button.setFocusable(True)
+                pin_button.setElevation(dp(8))
+
+                self._pin_click_listener = OnClickListener(
+                    lambda: self._request_map_center()
+                )
+                pin_button.setOnClickListener(self._pin_click_listener)
+
+                pin_params = FrameLayoutParams(dp(120), dp(56))
+                pin_params.gravity = Gravity.BOTTOM | Gravity.RIGHT
+                pin_params.setMargins(0, 0, dp(16), dp(24))
+                activity.addContentView(pin_button, pin_params)
+                pin_button.bringToFront()
+                self.pin_button_native = pin_button
+                self._map_center_callback_class = MapCenterCallback
 
             _create_webview()
         except Exception as e:
             print(f"[DEBUG] WebView表示に失敗: {e}")
             self.info_label.text = f"地図の表示に失敗しました: {e}\n(Android実機で確認してください)"
 
+    def _request_map_center(self):
+        app = App.get_running_app()
+        if self.webview is None:
+            return
+        Clock.schedule_once(
+            lambda dt: setattr(self.info_label, "text", app.tr("map_pin_getting_location"))
+        )
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            callback = self._map_center_callback_class(self._on_map_center_received)
+
+            @run_on_ui_thread
+            def _eval():
+                self.webview.evaluateJavascript(
+                    JString("JSON.stringify(map.getCenter())"), callback
+                )
+                self._pending_map_center_callback = callback  # GC対策で参照を保持
+
+            _eval()
+        except Exception as e:
+            print(f"[DEBUG] 地図中心座標の取得に失敗: {e}")
+
+    def _on_map_center_received(self, value_json):
+        # value_jsonの例: "\"{\\\"lat\\\":35.68,\\\"lng\\\":139.76}\"" のように二重にエスケープされている
+        try:
+            unescaped = json.loads(value_json)
+            center = json.loads(unescaped)
+            lat, lon = center["lat"], center["lng"]
+        except Exception as e:
+            print(f"[DEBUG] 地図中心座標のパースに失敗: {e}, value={value_json!r}")
+            return
+
+        def _go_to_add_pin(dt):
+            app = App.get_running_app()
+            app.pending_pin_location = (lat, lon)
+            app.pending_pin_source = "map"
+            self.manager.current = "add_pin"
+
+        Clock.schedule_once(_go_to_add_pin)
+
     def _remove_webview(self):
         views_to_remove = [
             getattr(self, "webview", None),
             getattr(self, "back_button_native", None),
+            getattr(self, "pin_button_native", None),
         ]
         if any(v is not None for v in views_to_remove):
             try:
@@ -1069,6 +1475,7 @@ class MapScreen(Screen):
                 print(f"[DEBUG] WebView削除に失敗: {e}")
             self.webview = None
             self.back_button_native = None
+            self.pin_button_native = None
 
     def go_back(self, instance):
         self.manager.current = "route_list"
@@ -1389,12 +1796,15 @@ class BikeTrackerApp(App):
     def build(self):
         self.title = "バイク記録アプリ"
         self.profile_manager = ProfileManager(self.user_data_dir)
+        self.pin_manager = PinManager(self.user_data_dir)
         self.settings_manager = SettingsManager(self.user_data_dir)
         self.language = self.settings_manager.get_language()
         self.timezone_offset = self.settings_manager.get_timezone_offset()
         self.selected_profile = None
         self.selected_route_date = None
         self.selected_route_dates = []  # 期間指定で選ばれた複数日付
+        self.pending_pin_location = (None, None)
+        self.pending_pin_source = "map"
 
         sm = ScreenManager()
         sm.add_widget(ProfileListScreen(name="profile_list"))
@@ -1404,6 +1814,7 @@ class BikeTrackerApp(App):
         sm.add_widget(MapScreen(name="map"))
         sm.add_widget(SettingsScreen(name="settings"))
         sm.add_widget(CalendarRangeScreen(name="calendar_range"))
+        sm.add_widget(AddPinScreen(name="add_pin"))
         return sm
 
     def tr(self, key, **kwargs):
