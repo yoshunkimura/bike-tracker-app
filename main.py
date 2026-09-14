@@ -49,6 +49,8 @@ LabelBase.register(
     fn_regular="fonts/NotoSansJP-Regular.ttf",
 )
 Config.set("kivy", "default_font", ["NotoSansJP", "fonts/NotoSansJP-Regular.ttf"])
+# Kivy標準のキーボードではなく、Android標準のキーボード(日本語IME等)を使う
+Config.set("kivy", "keyboard_mode", "system")
 
 try:
     from plyer import gps, filechooser
@@ -176,6 +178,8 @@ TRANSLATIONS = {
         "pin_text_hint": "メモ(例: ここで休憩した)",
         "map_add_pin_button": "+ ピン",
         "map_pin_getting_location": "地図の中心位置を取得中...",
+        "map_confirm_pin_button": "ここに追加",
+        "map_pin_drag_hint": "ピンをドラッグして位置を調整し、「ここに追加」をタップしてください",
     },
     "en": {
         "profile_list_title": "Select Profile",
@@ -240,6 +244,8 @@ TRANSLATIONS = {
         "pin_text_hint": "Memo (e.g. rested here)",
         "map_add_pin_button": "+ Pin",
         "map_pin_getting_location": "Getting map center...",
+        "map_confirm_pin_button": "Place Here",
+        "map_pin_drag_hint": "Drag the pin to adjust its position, then tap \"Place Here\"",
     },
 }
 
@@ -1104,6 +1110,7 @@ class MapScreen(Screen):
         self.webview = None
         self.back_button_native = None
         self.pin_button_native = None
+        self.pin_mode = False
         self.build_ui()
         self.show_map()
         Window.bind(on_keyboard=self._on_keyboard)
@@ -1387,11 +1394,11 @@ class MapScreen(Screen):
                 pin_button.setElevation(dp(8))
 
                 self._pin_click_listener = OnClickListener(
-                    lambda: self._request_map_center()
+                    lambda: self._toggle_pin_mode()
                 )
                 pin_button.setOnClickListener(self._pin_click_listener)
 
-                pin_params = FrameLayoutParams(dp(120), dp(56))
+                pin_params = FrameLayoutParams(dp(140), dp(56))
                 pin_params.gravity = Gravity.BOTTOM | Gravity.RIGHT
                 pin_params.setMargins(0, 0, dp(16), dp(24))
                 activity.addContentView(pin_button, pin_params)
@@ -1404,48 +1411,88 @@ class MapScreen(Screen):
             print(f"[DEBUG] WebView表示に失敗: {e}")
             self.info_label.text = f"地図の表示に失敗しました: {e}\n(Android実機で確認してください)"
 
-    def _request_map_center(self):
+    def _toggle_pin_mode(self):
         app = App.get_running_app()
         if self.webview is None:
             return
-        Clock.schedule_once(
-            lambda dt: setattr(self.info_label, "text", app.tr("map_pin_getting_location"))
-        )
         try:
             from jnius import autoclass
             from android.runnable import run_on_ui_thread
 
             JString = autoclass("java.lang.String")
-            callback = self._map_center_callback_class(self._on_map_center_received)
 
-            @run_on_ui_thread
-            def _eval():
-                self.webview.evaluateJavascript(
-                    JString("JSON.stringify(map.getCenter())"), callback
+            if not self.pin_mode:
+                # 地図の中心にドラッグ可能な仮ピンを表示する
+                js = (
+                    "if (window.pendingMarker) { map.removeLayer(window.pendingMarker); } "
+                    "window.pendingMarker = L.marker(map.getCenter(), "
+                    "{draggable: true}).addTo(map); null;"
                 )
-                self._pending_map_center_callback = callback  # GC対策で参照を保持
 
-            _eval()
+                @run_on_ui_thread
+                def _inject():
+                    self.webview.evaluateJavascript(JString(js), None)
+                    if self.pin_button_native is not None:
+                        self.pin_button_native.setText(JString(app.tr("map_confirm_pin_button")))
+
+                _inject()
+                self.pin_mode = True
+                Clock.schedule_once(
+                    lambda dt: setattr(self.info_label, "text", app.tr("map_pin_drag_hint"))
+                )
+            else:
+                callback = self._map_center_callback_class(self._on_pin_position_received)
+
+                @run_on_ui_thread
+                def _eval():
+                    self.webview.evaluateJavascript(
+                        JString("JSON.stringify(window.pendingMarker.getLatLng())"), callback
+                    )
+                    self._pending_map_center_callback = callback  # GC対策で参照を保持
+
+                _eval()
         except Exception as e:
-            print(f"[DEBUG] 地図中心座標の取得に失敗: {e}")
+            print(f"[DEBUG] ピン配置モードの切り替えに失敗: {e}")
 
-    def _on_map_center_received(self, value_json):
+    def _on_pin_position_received(self, value_json):
         # value_jsonの例: "\"{\\\"lat\\\":35.68,\\\"lng\\\":139.76}\"" のように二重にエスケープされている
         try:
             unescaped = json.loads(value_json)
             center = json.loads(unescaped)
             lat, lon = center["lat"], center["lng"]
         except Exception as e:
-            print(f"[DEBUG] 地図中心座標のパースに失敗: {e}, value={value_json!r}")
+            print(f"[DEBUG] ピン位置のパースに失敗: {e}, value={value_json!r}")
             return
 
-        def _go_to_add_pin(dt):
+        def _cleanup_and_go(dt):
             app = App.get_running_app()
+            try:
+                from jnius import autoclass
+                from android.runnable import run_on_ui_thread
+
+                JString = autoclass("java.lang.String")
+                cleanup_js = (
+                    "if (window.pendingMarker) { map.removeLayer(window.pendingMarker); "
+                    "window.pendingMarker = null; }"
+                )
+
+                @run_on_ui_thread
+                def _cleanup():
+                    if self.webview is not None:
+                        self.webview.evaluateJavascript(JString(cleanup_js), None)
+                    if self.pin_button_native is not None:
+                        self.pin_button_native.setText(JString(app.tr("map_add_pin_button")))
+
+                _cleanup()
+            except Exception as e:
+                print(f"[DEBUG] 仮ピンの後片付けに失敗: {e}")
+
+            self.pin_mode = False
             app.pending_pin_location = (lat, lon)
             app.pending_pin_source = "map"
             self.manager.current = "add_pin"
 
-        Clock.schedule_once(_go_to_add_pin)
+        Clock.schedule_once(_cleanup_and_go)
 
     def _remove_webview(self):
         views_to_remove = [
