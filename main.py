@@ -55,6 +55,126 @@ except Exception:
 
 
 # ---------------------------------------------------------------
+# 翻訳データ(日本語・英語)
+# ---------------------------------------------------------------
+TRANSLATIONS = {
+    "ja": {
+        "profile_list_title": "プロファイルを選択",
+        "profile_list_empty": "まだプロファイルがありません\n右下の「+」から作成してください",
+        "add_profile_button": "+ 新しいプロファイルを作成",
+        "map_button": "地図で見る",
+        "no_photo": "(写真なし)",
+        "settings_button": "設定",
+        "add_profile_title": "新しいプロファイル",
+        "bike_name_hint": "バイクの名前(例: CB400SF)",
+        "gallery_button": "写真を選択(ギャラリーから)",
+        "cancel_button": "キャンセル",
+        "save_button": "保存",
+        "name_required": "バイクの名前を入力してください",
+        "gallery_unavailable": "ギャラリー機能が利用できません(実機で確認してください)",
+        "gallery_not_supported": "この端末ではギャラリー選択がサポートされていません",
+        "gallery_error": "ギャラリーエラー: {error}",
+        "photo_not_selected": "写真が選択されませんでした",
+        "photo_selected": "写真を選択しました",
+        "photo_get_failed": "写真を取得できませんでした。もう一度お試しください",
+        "preview_error": "プレビューエラー: {error}",
+        "tracker_title": "プロファイル: {name}",
+        "tracker_status_initial": "スタートボタンを押してください\n(スリープ中も記録が続きます)",
+        "start_button": "スタート",
+        "stop_button": "ストップ",
+        "back_to_profile_list": "プロファイル一覧に戻る",
+        "no_profile_selected": "プロファイルが選択されていません",
+        "state_write_failed": "状態ファイルの書き込みに失敗: {error}",
+        "tracking_started": "バックグラウンドで記録中です\n(通知バーを確認してください)",
+        "service_start_error": "サービス起動エラー: {error}",
+        "tracking_stopped": "記録を停止しました",
+        "route_list_title": "{name} の記録一覧",
+        "route_list_empty": "まだ記録がありません",
+        "map_loading": "地図を読み込んでいます...",
+        "map_no_data": "表示する記録が選択されていません",
+        "map_info": "{name} / {date}({count}点)",
+        "map_no_points_banner": "座標が記録されていません(記録時間が短すぎた可能性があります)",
+        "map_back_button": "< 戻る",
+        "settings_title": "設定",
+        "language_label": "言語 / Language",
+        "language_ja": "日本語",
+        "language_en": "English",
+    },
+    "en": {
+        "profile_list_title": "Select Profile",
+        "profile_list_empty": "No profiles yet\nTap \"+\" below to create one",
+        "add_profile_button": "+ Add New Profile",
+        "map_button": "View Map",
+        "no_photo": "(no photo)",
+        "settings_button": "Settings",
+        "add_profile_title": "New Profile",
+        "bike_name_hint": "Bike name (e.g. CB400SF)",
+        "gallery_button": "Choose Photo (Gallery)",
+        "cancel_button": "Cancel",
+        "save_button": "Save",
+        "name_required": "Please enter a bike name",
+        "gallery_unavailable": "Gallery is unavailable (please test on a real device)",
+        "gallery_not_supported": "Gallery selection is not supported on this device",
+        "gallery_error": "Gallery error: {error}",
+        "photo_not_selected": "No photo was selected",
+        "photo_selected": "Photo selected",
+        "photo_get_failed": "Could not get the photo. Please try again",
+        "preview_error": "Preview error: {error}",
+        "tracker_title": "Profile: {name}",
+        "tracker_status_initial": "Press Start to begin\n(recording continues while asleep)",
+        "start_button": "Start",
+        "stop_button": "Stop",
+        "back_to_profile_list": "Back to Profile List",
+        "no_profile_selected": "No profile selected",
+        "state_write_failed": "Failed to write state file: {error}",
+        "tracking_started": "Recording in background\n(check the notification bar)",
+        "service_start_error": "Service start error: {error}",
+        "tracking_stopped": "Recording stopped",
+        "route_list_title": "{name}'s Records",
+        "route_list_empty": "No records yet",
+        "map_loading": "Loading map...",
+        "map_no_data": "No record selected to display",
+        "map_info": "{name} / {date} ({count} points)",
+        "map_no_points_banner": "No coordinates recorded (recording time may have been too short)",
+        "map_back_button": "< Back",
+        "settings_title": "Settings",
+        "language_label": "言語 / Language",
+        "language_ja": "日本語",
+        "language_en": "English",
+    },
+}
+
+
+# ---------------------------------------------------------------
+# 設定管理: 選択中の言語の保存・読み込み
+# ---------------------------------------------------------------
+class SettingsManager:
+    def __init__(self, base_dir):
+        self.settings_file = os.path.join(base_dir, "settings.json")
+        self.settings = self._load()
+
+    def _load(self):
+        if os.path.exists(self.settings_file):
+            try:
+                with open(self.settings_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save(self):
+        with open(self.settings_file, "w", encoding="utf-8") as f:
+            json.dump(self.settings, f, ensure_ascii=False, indent=2)
+
+    def get_language(self):
+        return self.settings.get("language", "ja")
+
+    def set_language(self, language):
+        self.settings["language"] = language
+        self._save()
+
+
+# ---------------------------------------------------------------
 # データ管理: プロファイルの保存・読み込み、走行記録ファイルの管理
 # ---------------------------------------------------------------
 class ProfileManager:
@@ -139,26 +259,36 @@ class ProfileListScreen(Screen):
 
     def build_ui(self):
         self.clear_widgets()
+        app = App.get_running_app()
         root = BoxLayout(orientation="vertical", padding=20, spacing=15)
 
+        title_row = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
         title = Label(
-            text="プロファイルを選択",
+            text=app.tr("profile_list_title"),
             font_size="24sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.12),
         )
-        root.add_widget(title)
+        title_row.add_widget(title)
+
+        settings_button = Button(
+            text=app.tr("settings_button"),
+            font_name="NotoSansJP",
+            font_size="14sp",
+            size_hint=(0.3, 1),
+        )
+        settings_button.bind(on_press=self.go_to_settings)
+        title_row.add_widget(settings_button)
+        root.add_widget(title_row)
 
         scroll = ScrollView(size_hint=(1, 0.72))
         grid = GridLayout(cols=2, spacing=15, size_hint_y=None, padding=5)
         grid.bind(minimum_height=grid.setter("height"))
 
-        app = App.get_running_app()
         profiles = app.profile_manager.profiles
 
         if not profiles:
             empty_label = Label(
-                text="まだプロファイルがありません\n右下の「+」から作成してください",
+                text=app.tr("profile_list_empty"),
                 font_name="NotoSansJP",
                 font_size="16sp",
                 size_hint_y=None,
@@ -173,7 +303,7 @@ class ProfileListScreen(Screen):
         root.add_widget(scroll)
 
         add_button = Button(
-            text="+ 新しいプロファイルを作成",
+            text=app.tr("add_profile_button"),
             font_name="NotoSansJP",
             font_size="18sp",
             size_hint=(1, 0.12),
@@ -184,13 +314,17 @@ class ProfileListScreen(Screen):
 
         self.add_widget(root)
 
+    def go_to_settings(self, instance):
+        self.manager.current = "settings"
+
     def _build_profile_card(self, profile):
+        app = App.get_running_app()
         card = BoxLayout(orientation="vertical", size_hint_y=None, height=230)
 
         if profile.get("photo") and os.path.exists(profile["photo"]):
             img = KivyImage(source=profile["photo"], size_hint=(1, 0.6))
         else:
-            img = Label(text="(写真なし)", font_name="NotoSansJP", size_hint=(1, 0.6))
+            img = Label(text=app.tr("no_photo"), font_name="NotoSansJP", size_hint=(1, 0.6))
         card.add_widget(img)
 
         name_button = Button(
@@ -205,7 +339,7 @@ class ProfileListScreen(Screen):
         card.add_widget(name_button)
 
         map_button = Button(
-            text="地図で見る",
+            text=app.tr("map_button"),
             font_name="NotoSansJP",
             font_size="14sp",
             size_hint=(1, 0.18),
@@ -241,10 +375,11 @@ class AddProfileScreen(Screen):
 
     def build_ui(self):
         self.clear_widgets()
+        app = App.get_running_app()
         root = BoxLayout(orientation="vertical", padding=20, spacing=15)
 
         title = Label(
-            text="新しいプロファイル",
+            text=app.tr("add_profile_title"),
             font_size="22sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.1),
@@ -252,7 +387,7 @@ class AddProfileScreen(Screen):
         root.add_widget(title)
 
         self.name_input = TextInput(
-            hint_text="バイクの名前(例: CB400SF)",
+            hint_text=app.tr("bike_name_hint"),
             font_name="NotoSansJP",
             font_size="18sp",
             size_hint=(1, 0.12),
@@ -265,7 +400,7 @@ class AddProfileScreen(Screen):
 
         photo_buttons = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
         gallery_button = Button(
-            text="写真を選択(ギャラリーから)",
+            text=app.tr("gallery_button"),
             font_name="NotoSansJP",
             font_size="16sp",
         )
@@ -277,10 +412,10 @@ class AddProfileScreen(Screen):
         root.add_widget(self.status_label)
 
         bottom_buttons = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
-        cancel_button = Button(text="キャンセル", font_name="NotoSansJP", font_size="16sp")
+        cancel_button = Button(text=app.tr("cancel_button"), font_name="NotoSansJP", font_size="16sp")
         cancel_button.bind(on_press=self.cancel)
         save_button = Button(
-            text="保存",
+            text=app.tr("save_button"),
             font_name="NotoSansJP",
             font_size="18sp",
             background_color=(0.2, 0.6, 1, 1),
@@ -293,8 +428,9 @@ class AddProfileScreen(Screen):
         self.add_widget(root)
 
     def pick_from_gallery(self, instance):
+        app = App.get_running_app()
         if not PLYER_AVAILABLE:
-            self.status_label.text = "ギャラリー機能が利用できません(実機で確認してください)"
+            self.status_label.text = app.tr("gallery_unavailable")
             return
         try:
             print("[DEBUG] filechooser.open_fileを呼び出します")
@@ -303,45 +439,47 @@ class AddProfileScreen(Screen):
                 filters=[["画像", "*.jpg", "*.jpeg", "*.png"]],
             )
         except NotImplementedError:
-            self.status_label.text = "この端末ではギャラリー選択がサポートされていません"
+            self.status_label.text = app.tr("gallery_not_supported")
         except Exception as e:
             print(f"[DEBUG] filechooserで例外発生: {e}")
-            self.status_label.text = f"ギャラリーエラー: {e}"
+            self.status_label.text = app.tr("gallery_error", error=e)
 
     def _on_gallery_selected(self, selection):
+        app = App.get_running_app()
         print(f"[DEBUG] ギャラリー選択結果(生データ): {selection!r}")
         if selection and selection[0]:
             Clock.schedule_once(lambda dt: self._set_preview(selection[0]))
         else:
             Clock.schedule_once(
-                lambda dt: setattr(self.status_label, "text", "写真が選択されませんでした")
+                lambda dt: setattr(self.status_label, "text", app.tr("photo_not_selected"))
             )
 
     def _set_preview(self, path):
+        app = App.get_running_app()
         print(f"[DEBUG] _set_previewに渡されたpath: {path!r}")
         if not path or not os.path.exists(path):
             print(f"[DEBUG] pathが空、またはファイルが存在しません: {path!r}")
-            self.status_label.text = "写真を取得できませんでした。もう一度お試しください"
+            self.status_label.text = app.tr("photo_get_failed")
             return
         try:
             self.selected_photo_path = path
             self.preview_image.source = path
             self.preview_image.reload()
-            self.status_label.text = "写真を選択しました"
+            self.status_label.text = app.tr("photo_selected")
         except Exception as e:
             print(f"[DEBUG] プレビュー表示で例外発生: {e}")
-            self.status_label.text = f"プレビューエラー: {e}"
+            self.status_label.text = app.tr("preview_error", error=e)
 
     def cancel(self, instance):
         self.manager.current = "profile_list"
 
     def save_profile(self, instance):
+        app = App.get_running_app()
         name = self.name_input.text.strip()
         if not name:
-            self.status_label.text = "バイクの名前を入力してください"
+            self.status_label.text = app.tr("name_required")
             return
 
-        app = App.get_running_app()
         app.profile_manager.add_profile(name, self.selected_photo_path)
         self.manager.current = "profile_list"
 
@@ -360,10 +498,10 @@ class TrackerScreen(Screen):
         root = BoxLayout(orientation="vertical", padding=20, spacing=20)
 
         app = App.get_running_app()
-        profile_name = app.selected_profile["name"] if app.selected_profile else "(不明)"
+        profile_name = app.selected_profile["name"] if app.selected_profile else "(?)"
 
         self.title_label = Label(
-            text=f"プロファイル: {profile_name}",
+            text=app.tr("tracker_title", name=profile_name),
             font_size="18sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.15),
@@ -371,7 +509,7 @@ class TrackerScreen(Screen):
         root.add_widget(self.title_label)
 
         self.status_label = Label(
-            text="スタートボタンを押してください\n(スリープ中も記録が続きます)",
+            text=app.tr("tracker_status_initial"),
             font_size="18sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.25),
@@ -379,7 +517,7 @@ class TrackerScreen(Screen):
         root.add_widget(self.status_label)
 
         self.start_button = Button(
-            text="スタート",
+            text=app.tr("start_button"),
             font_size="24sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.2),
@@ -389,7 +527,7 @@ class TrackerScreen(Screen):
         root.add_widget(self.start_button)
 
         self.stop_button = Button(
-            text="ストップ",
+            text=app.tr("stop_button"),
             font_size="24sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.2),
@@ -399,7 +537,7 @@ class TrackerScreen(Screen):
         root.add_widget(self.stop_button)
 
         back_button = Button(
-            text="プロファイル一覧に戻る",
+            text=app.tr("back_to_profile_list"),
             font_name="NotoSansJP",
             font_size="16sp",
             size_hint=(1, 0.15),
@@ -420,7 +558,7 @@ class TrackerScreen(Screen):
     def start_tracking(self, instance):
         app = App.get_running_app()
         if not app.selected_profile:
-            self.status_label.text = "プロファイルが選択されていません"
+            self.status_label.text = app.tr("no_profile_selected")
             return
 
         self.route_file_path = app.profile_manager.route_file_for(app.selected_profile["id"])
@@ -431,21 +569,20 @@ class TrackerScreen(Screen):
             with open(state_file, "w", encoding="utf-8") as f:
                 json.dump({"route_file": self.route_file_path}, f, ensure_ascii=False)
         except Exception as e:
-            self.status_label.text = f"状態ファイルの書き込みに失敗: {e}"
+            self.status_label.text = app.tr("state_write_failed", error=e)
             return
 
         try:
             service_class, mactivity = self._get_service_class()
             service_class.start(mactivity, "")
             self.tracking = True
-            self.status_label.text = (
-                "バックグラウンドで記録中です\n(通知バーを確認してください)"
-            )
+            self.status_label.text = app.tr("tracking_started")
         except Exception as e:
             print(f"[DEBUG] サービス起動に失敗: {e}")
-            self.status_label.text = f"サービス起動エラー: {e}"
+            self.status_label.text = app.tr("service_start_error", error=e)
 
     def stop_tracking(self, instance):
+        app = App.get_running_app()
         if not self.tracking:
             return
         try:
@@ -454,7 +591,7 @@ class TrackerScreen(Screen):
         except Exception as e:
             print(f"[DEBUG] サービス停止に失敗: {e}")
         self.tracking = False
-        self.status_label.text = "記録を停止しました"
+        self.status_label.text = app.tr("tracking_stopped")
 
     def go_back(self, instance):
         # 記録中でも、バックグラウンドで動き続けさせたいので
@@ -478,7 +615,7 @@ class RouteListScreen(Screen):
         profile_name = profile["name"] if profile else "(不明)"
 
         title = Label(
-            text=f"{profile_name} の記録一覧",
+            text=app.tr("route_list_title", name=profile_name),
             font_size="20sp",
             font_name="NotoSansJP",
             size_hint=(1, 0.12),
@@ -494,7 +631,7 @@ class RouteListScreen(Screen):
         if not dates:
             box.add_widget(
                 Label(
-                    text="まだ記録がありません",
+                    text=app.tr("route_list_empty"),
                     font_name="NotoSansJP",
                     size_hint_y=None,
                     height=60,
@@ -516,7 +653,7 @@ class RouteListScreen(Screen):
         root.add_widget(scroll)
 
         back_button = Button(
-            text="プロファイル一覧に戻る",
+            text=app.tr("back_to_profile_list"),
             font_name="NotoSansJP",
             font_size="16sp",
             size_hint=(1, 0.12),
@@ -559,10 +696,11 @@ class MapScreen(Screen):
 
     def build_ui(self):
         self.clear_widgets()
+        app = App.get_running_app()
         root = BoxLayout(orientation="vertical", padding=10, spacing=10)
 
         self.info_label = Label(
-            text="地図を読み込んでいます...",
+            text=app.tr("map_loading"),
             font_name="NotoSansJP",
             font_size="16sp",
             size_hint=(1, 1),
@@ -572,10 +710,11 @@ class MapScreen(Screen):
         self.add_widget(root)
 
     def _build_html(self, points, info_text=""):
+        app = App.get_running_app()
         if not points:
             coords_js = "[]"
             center_js = "[35.681236, 139.767125]"  # 東京駅(データが無い場合のデフォルト)
-            banner = "座標が記録されていません(記録時間が短すぎた可能性があります)"
+            banner = app.tr("map_no_points_banner")
         else:
             coords_js = str([[lat, lon] for lat, lon in points])
             # 記録を開始した地点(先頭の座標)を中心にする
@@ -626,11 +765,11 @@ class MapScreen(Screen):
         date_str = getattr(app, "selected_route_date", None)
 
         if not profile or not date_str:
-            self.info_label.text = "表示する記録が選択されていません"
+            self.info_label.text = app.tr("map_no_data")
             return
 
         points = app.profile_manager.load_route_points(profile["id"], date_str)
-        info_text = f"{profile['name']} / {date_str}({len(points)}点)"
+        info_text = app.tr("map_info", name=profile["name"], date=date_str, count=len(points))
         self.info_label.text = info_text
 
         html = self._build_html(points, info_text)
@@ -678,7 +817,8 @@ class MapScreen(Screen):
                     return int(v * density)
 
                 back_button = AndroidButton(activity)
-                back_button.setText("< 戻る")
+                JString = autoclass("java.lang.String")
+                back_button.setText(JString(app.tr("map_back_button")))
                 back_button.setTextColor(Color.WHITE)
                 back_button.setBackgroundColor(Color.parseColor("#CC1976D2"))
                 back_button.setAllCaps(False)
@@ -727,12 +867,82 @@ class MapScreen(Screen):
 
 
 # ---------------------------------------------------------------
+# 画面6: 設定(言語選択)
+# ---------------------------------------------------------------
+class SettingsScreen(Screen):
+    def on_pre_enter(self, *args):
+        self.build_ui()
+
+    def build_ui(self):
+        self.clear_widgets()
+        app = App.get_running_app()
+        root = BoxLayout(orientation="vertical", padding=20, spacing=15)
+
+        title = Label(
+            text=app.tr("settings_title"),
+            font_size="22sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.15),
+        )
+        root.add_widget(title)
+
+        label = Label(
+            text=app.tr("language_label"),
+            font_size="18sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.15),
+        )
+        root.add_widget(label)
+
+        ja_button = Button(
+            text=app.tr("language_ja"),
+            font_name="NotoSansJP",
+            font_size="18sp",
+            size_hint=(1, 0.2),
+            background_color=(0.2, 0.6, 1, 1) if app.language == "ja" else (0.5, 0.5, 0.5, 1),
+        )
+        ja_button.bind(on_press=lambda instance: self.set_language("ja"))
+        root.add_widget(ja_button)
+
+        en_button = Button(
+            text=app.tr("language_en"),
+            font_name="NotoSansJP",
+            font_size="18sp",
+            size_hint=(1, 0.2),
+            background_color=(0.2, 0.6, 1, 1) if app.language == "en" else (0.5, 0.5, 0.5, 1),
+        )
+        en_button.bind(on_press=lambda instance: self.set_language("en"))
+        root.add_widget(en_button)
+
+        back_button = Button(
+            text=app.tr("back_to_profile_list"),
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.15),
+        )
+        back_button.bind(on_press=self.go_back)
+        root.add_widget(back_button)
+
+        self.add_widget(root)
+
+    def set_language(self, language):
+        app = App.get_running_app()
+        app.set_language(language)
+        self.build_ui()
+
+    def go_back(self, instance):
+        self.manager.current = "profile_list"
+
+
+# ---------------------------------------------------------------
 # アプリ本体
 # ---------------------------------------------------------------
 class BikeTrackerApp(App):
     def build(self):
         self.title = "バイク記録アプリ"
         self.profile_manager = ProfileManager(self.user_data_dir)
+        self.settings_manager = SettingsManager(self.user_data_dir)
+        self.language = self.settings_manager.get_language()
         self.selected_profile = None
         self.selected_route_date = None
 
@@ -742,7 +952,21 @@ class BikeTrackerApp(App):
         sm.add_widget(TrackerScreen(name="tracker"))
         sm.add_widget(RouteListScreen(name="route_list"))
         sm.add_widget(MapScreen(name="map"))
+        sm.add_widget(SettingsScreen(name="settings"))
         return sm
+
+    def tr(self, key, **kwargs):
+        text = TRANSLATIONS.get(self.language, TRANSLATIONS["ja"]).get(key, key)
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except Exception:
+                return text
+        return text
+
+    def set_language(self, language):
+        self.language = language
+        self.settings_manager.set_language(language)
 
     def on_start(self):
         try:
