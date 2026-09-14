@@ -396,8 +396,7 @@ class ProfileManager:
 # データ管理: ピン(地図上の写真付きマーカー)の保存・読み込み
 # ---------------------------------------------------------------
 class PinManager:
-    MAX_PHOTO_SIZE = 800  # 縦横の最大ピクセル数(それ以上は縮小する)
-    JPEG_QUALITY = 75
+    MAX_EMBED_BYTES = 1.5 * 1024 * 1024  # 地図に埋め込む際のファイルサイズ上限(これを超えると写真は省略)
 
     def __init__(self, base_dir):
         self.base_dir = base_dir
@@ -424,25 +423,18 @@ class PinManager:
             json.dump(pins, f, ensure_ascii=False, indent=2)
 
     def _store_photo(self, pin_id, photo_source_path):
-        """写真を縮小してアプリ専用フォルダに保存し、保存先のパスを返す"""
-        dest_path = os.path.join(self.photos_dir, f"{pin_id}.jpg")
+        """写真をアプリ専用フォルダにそのままコピーし、保存先のパスを返す"""
+        ext = os.path.splitext(photo_source_path)[1].lower() or ".jpg"
+        if ext not in (".jpg", ".jpeg", ".png"):
+            ext = ".jpg"
+        dest_path = os.path.join(self.photos_dir, f"{pin_id}{ext}")
         try:
-            from PIL import Image as PILImage
-
-            img = PILImage.open(photo_source_path)
-            img = img.convert("RGB")
-            img.thumbnail((self.MAX_PHOTO_SIZE, self.MAX_PHOTO_SIZE))
-            img.save(dest_path, "JPEG", quality=self.JPEG_QUALITY)
+            with open(photo_source_path, "rb") as src, open(dest_path, "wb") as dst:
+                dst.write(src.read())
             return dest_path
         except Exception as e:
-            print(f"[DEBUG] 写真の縮小保存に失敗、元ファイルをそのままコピーします: {e}")
-            try:
-                with open(photo_source_path, "rb") as src, open(dest_path, "wb") as dst:
-                    dst.write(src.read())
-                return dest_path
-            except Exception as e2:
-                print(f"[DEBUG] 写真のコピーにも失敗: {e2}")
-                return None
+            print(f"[DEBUG] 写真のコピーに失敗: {e}")
+            return None
 
     def add_pin(self, profile_id, lat, lon, text, photo_source_path=None):
         pin_id = str(uuid.uuid4())
@@ -468,9 +460,15 @@ class PinManager:
         if not photo or not os.path.exists(photo):
             return None
         try:
+            if os.path.getsize(photo) > self.MAX_EMBED_BYTES:
+                # 大きすぎる写真は地図の読み込みが重くなるため埋め込みを省略する
+                print(f"[DEBUG] 写真サイズが大きいため地図への埋め込みを省略: {photo}")
+                return None
+            ext = os.path.splitext(photo)[1].lower()
+            mime = "image/png" if ext == ".png" else "image/jpeg"
             with open(photo, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
+            return f"data:{mime};base64,{encoded}"
         except Exception as e:
             print(f"[DEBUG] 写真のbase64変換に失敗: {e}")
             return None
