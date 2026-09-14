@@ -541,6 +541,7 @@ class RouteListScreen(Screen):
 class MapScreen(Screen):
     def on_pre_enter(self, *args):
         self.webview = None
+        self.back_button_native = None
         self.build_ui()
         self.show_map()
         Window.bind(on_keyboard=self._on_keyboard)
@@ -561,7 +562,7 @@ class MapScreen(Screen):
         root = BoxLayout(orientation="vertical", padding=10, spacing=10)
 
         self.info_label = Label(
-            text="地図を読み込んでいます...\n(表示中は端末の「戻る」操作で一覧に戻れます)",
+            text="地図を読み込んでいます...",
             font_name="NotoSansJP",
             font_size="16sp",
             size_hint=(1, 1),
@@ -592,20 +593,14 @@ class MapScreen(Screen):
     html, body, #map {{ height: 100%; margin: 0; padding: 0; }}
     #banner {{
       position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-      background: rgba(0,0,0,0.6); color: white; padding: 8px;
-      font-size: 14px; text-align: center;
-    }}
-    #back-hint {{
-      position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000;
-      background: rgba(0,0,0,0.6); color: white; padding: 8px;
-      font-size: 13px; text-align: center;
+      background: rgba(0,0,0,0.6); color: white; padding: 8px 8px 8px 130px;
+      font-size: 14px; text-align: left;
     }}
   </style>
 </head>
 <body>
   <div id="banner">{banner}</div>
   <div id="map"></div>
-  <div id="back-hint">端末の「戻る」操作でプロファイル一覧に戻ります</div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     var points = {coords_js};
@@ -641,15 +636,31 @@ class MapScreen(Screen):
         html = self._build_html(points, info_text)
 
         try:
-            from jnius import autoclass
+            from jnius import autoclass, PythonJavaClass, java_method
             from android.runnable import run_on_ui_thread
 
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             WebView = autoclass("android.webkit.WebView")
             WebViewClient = autoclass("android.webkit.WebViewClient")
             LayoutParams = autoclass("android.view.ViewGroup$LayoutParams")
+            FrameLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+            AndroidButton = autoclass("android.widget.Button")
+            Gravity = autoclass("android.view.Gravity")
+            Color = autoclass("android.graphics.Color")
 
             activity = PythonActivity.mActivity
+
+            class OnClickListener(PythonJavaClass):
+                __javainterfaces__ = ["android/view/View$OnClickListener"]
+                __javacontext__ = "app"
+
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+
+                @java_method("(Landroid/view/View;)V")
+                def onClick(self, view):
+                    self.callback()
 
             @run_on_ui_thread
             def _create_webview():
@@ -661,28 +672,55 @@ class MapScreen(Screen):
                 activity.addContentView(webview, LayoutParams(-1, -1))
                 self.webview = webview
 
+                # 地図の上に重ねて表示する「戻る」ボタン(左上、邪魔にならない位置)
+                density = activity.getResources().getDisplayMetrics().density
+                def dp(v):
+                    return int(v * density)
+
+                back_button = AndroidButton(activity)
+                back_button.setText("< 戻る")
+                back_button.setTextColor(Color.WHITE)
+                back_button.setBackgroundColor(Color.parseColor("#CC1976D2"))
+                back_button.setAllCaps(False)
+
+                self._back_click_listener = OnClickListener(
+                    lambda: Clock.schedule_once(lambda dt: self.go_back(None))
+                )
+                back_button.setOnClickListener(self._back_click_listener)
+
+                params = FrameLayoutParams(dp(110), dp(48))
+                params.gravity = Gravity.TOP | Gravity.LEFT
+                params.setMargins(dp(12), dp(40), 0, 0)
+                activity.addContentView(back_button, params)
+                self.back_button_native = back_button
+
             _create_webview()
         except Exception as e:
             print(f"[DEBUG] WebView表示に失敗: {e}")
             self.info_label.text = f"地図の表示に失敗しました: {e}\n(Android実機で確認してください)"
 
     def _remove_webview(self):
-        if self.webview is not None:
+        views_to_remove = [
+            getattr(self, "webview", None),
+            getattr(self, "back_button_native", None),
+        ]
+        if any(v is not None for v in views_to_remove):
             try:
                 from android.runnable import run_on_ui_thread
 
-                webview = self.webview
-
                 @run_on_ui_thread
                 def _remove():
-                    parent = webview.getParent()
-                    if parent is not None:
-                        parent.removeView(webview)
+                    for v in views_to_remove:
+                        if v is not None:
+                            parent = v.getParent()
+                            if parent is not None:
+                                parent.removeView(v)
 
                 _remove()
             except Exception as e:
                 print(f"[DEBUG] WebView削除に失敗: {e}")
             self.webview = None
+            self.back_button_native = None
 
     def go_back(self, instance):
         self.manager.current = "route_list"
