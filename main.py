@@ -18,7 +18,9 @@ import os
 import json
 import uuid
 import csv
-from datetime import datetime
+import math
+import calendar
+from datetime import datetime, timezone, timedelta
 
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
@@ -52,6 +54,58 @@ try:
     PLYER_AVAILABLE = True
 except Exception:
     PLYER_AVAILABLE = False
+
+
+# ---------------------------------------------------------------
+# 距離計算(2点間の距離をkmで返す/ルート全体の距離を合計する)
+# ---------------------------------------------------------------
+def haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0  # 地球の半径(km)
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * R * math.asin(min(1, math.sqrt(a)))
+
+
+def route_distance_km(points):
+    total = 0.0
+    for i in range(1, len(points)):
+        lat1, lon1 = points[i - 1][0], points[i - 1][1]
+        lat2, lon2 = points[i][0], points[i][1]
+        total += haversine_km(lat1, lon1, lat2, lon2)
+    return total
+
+
+# ---------------------------------------------------------------
+# タイムゾーン選択肢(固定オフセット方式。タイムゾーンDB不要で軽量)
+# ---------------------------------------------------------------
+TIMEZONE_CHOICES = [
+    ("UTC-8 (米国太平洋)", -8),
+    ("UTC-5 (米国東部)", -5),
+    ("UTC+0 (UTC)", 0),
+    ("UTC+1 (中央ヨーロッパ)", 1),
+    ("UTC+8 (中国/台湾)", 8),
+    ("UTC+9 (日本/韓国)", 9),
+    ("UTC+10 (東部オーストラリア)", 10),
+]
+
+
+def format_time_in_offset(iso_str, offset_hours):
+    """
+    UTC('Z'付き)のISO時刻文字列を指定したオフセットのローカル時刻(HH:MM)に変換する。
+    'Z'が付いていない古い形式のデータは、タイムゾーン変換をせずそのまま解釈する
+    (アップデート前の記録との互換性のため)。
+    """
+    try:
+        if iso_str.endswith("Z"):
+            dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+            dt = dt.astimezone(timezone(timedelta(hours=offset_hours)))
+        else:
+            dt = datetime.fromisoformat(iso_str)
+        return dt.strftime("%H:%M")
+    except Exception:
+        return "--:--"
 
 
 # ---------------------------------------------------------------
@@ -99,6 +153,20 @@ TRANSLATIONS = {
         "language_label": "言語 / Language",
         "language_ja": "日本語",
         "language_en": "English",
+        "timezone_label": "タイムゾーン",
+        "total_distance": "累計走行距離: {distance} km",
+        "day_distance": "{date}({distance} km)",
+        "range_select_button": "期間を指定して見る",
+        "calendar_title": "期間を選択",
+        "calendar_start": "開始日: {date}",
+        "calendar_end": "終了日: {date}",
+        "calendar_not_set": "未選択",
+        "calendar_confirm_map": "地図で見る",
+        "calendar_confirm_distance": "距離を見る",
+        "calendar_reset": "選択をやり直す",
+        "calendar_no_data": "この期間の記録がありません",
+        "range_distance_result": "{start} 〜 {end}\n走行距離: {distance} km",
+        "close_button": "閉じる",
     },
     "en": {
         "profile_list_title": "Select Profile",
@@ -141,6 +209,20 @@ TRANSLATIONS = {
         "language_label": "言語 / Language",
         "language_ja": "日本語",
         "language_en": "English",
+        "timezone_label": "Time Zone",
+        "total_distance": "Total distance: {distance} km",
+        "day_distance": "{date} ({distance} km)",
+        "range_select_button": "View by Date Range",
+        "calendar_title": "Select Date Range",
+        "calendar_start": "Start: {date}",
+        "calendar_end": "End: {date}",
+        "calendar_not_set": "Not set",
+        "calendar_confirm_map": "View Map",
+        "calendar_confirm_distance": "View Distance",
+        "calendar_reset": "Reset Selection",
+        "calendar_no_data": "No records in this date range",
+        "range_distance_result": "{start} - {end}\nDistance: {distance} km",
+        "close_button": "Close",
     },
 }
 
@@ -171,6 +253,13 @@ class SettingsManager:
 
     def set_language(self, language):
         self.settings["language"] = language
+        self._save()
+
+    def get_timezone_offset(self):
+        return self.settings.get("timezone_offset", 9)  # デフォルトは日本(UTC+9)
+
+    def set_timezone_offset(self, offset_hours):
+        self.settings["timezone_offset"] = offset_hours
         self._save()
 
 
@@ -235,7 +324,8 @@ class ProfileManager:
         dates = [f[:-4] for f in os.listdir(folder) if f.endswith(".csv")]
         return sorted(dates, reverse=True)
 
-    def load_route_points(self, profile_id, date_str):
+    def load_route_points_with_time(self, profile_id, date_str):
+        """[(timestamp_str, lat, lon), ...] を返す"""
         path = os.path.join(self.routes_dir, profile_id, f"{date_str}.csv")
         points = []
         if not os.path.exists(path):
@@ -244,10 +334,45 @@ class ProfileManager:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
-                    points.append((float(row["lat"]), float(row["lon"])))
+                    points.append(
+                        (row.get("timestamp", ""), float(row["lat"]), float(row["lon"]))
+                    )
                 except (KeyError, ValueError):
                     continue
         return points
+
+    def load_route_points(self, profile_id, date_str):
+        return [(lat, lon) for _, lat, lon in self.load_route_points_with_time(profile_id, date_str)]
+
+    def route_distance_for_date(self, profile_id, date_str):
+        points = self.load_route_points(profile_id, date_str)
+        return route_distance_km(points)
+
+    def total_distance_km(self, profile_id):
+        total = 0.0
+        for date_str in self.list_route_dates(profile_id):
+            total += self.route_distance_for_date(profile_id, date_str)
+        return total
+
+    def dates_in_range(self, profile_id, start_date, end_date):
+        """start_date, end_dateは 'YYYY-MM-DD' 文字列。両端を含む範囲で該当する日付を返す"""
+        all_dates = self.list_route_dates(profile_id)
+        return sorted([d for d in all_dates if start_date <= d <= end_date])
+
+    def distance_km_in_range(self, profile_id, start_date, end_date):
+        total = 0.0
+        for date_str in self.dates_in_range(profile_id, start_date, end_date):
+            total += self.route_distance_for_date(profile_id, date_str)
+        return total
+
+    def load_route_segments(self, profile_id, dates):
+        """複数日付ぶんの座標を、日付ごとの区切り(セグメント)のリストとして返す"""
+        segments = []
+        for date_str in dates:
+            points = self.load_route_points(profile_id, date_str)
+            if points:
+                segments.append(points)
+        return segments
 
 
 # ---------------------------------------------------------------
@@ -618,11 +743,29 @@ class RouteListScreen(Screen):
             text=app.tr("route_list_title", name=profile_name),
             font_size="20sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.12),
+            size_hint=(1, 0.1),
         )
         root.add_widget(title)
 
-        scroll = ScrollView(size_hint=(1, 0.76))
+        total_km = app.profile_manager.total_distance_km(profile["id"]) if profile else 0.0
+        total_label = Label(
+            text=app.tr("total_distance", distance=f"{total_km:.1f}"),
+            font_size="16sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.08),
+        )
+        root.add_widget(total_label)
+
+        range_button = Button(
+            text=app.tr("range_select_button"),
+            font_name="NotoSansJP",
+            font_size="16sp",
+            size_hint=(1, 0.1),
+        )
+        range_button.bind(on_press=self.go_to_calendar)
+        root.add_widget(range_button)
+
+        scroll = ScrollView(size_hint=(1, 0.52))
         box = BoxLayout(orientation="vertical", spacing=10, size_hint_y=None, padding=5)
         box.bind(minimum_height=box.setter("height"))
 
@@ -639,10 +782,11 @@ class RouteListScreen(Screen):
             )
         else:
             for date_str in dates:
+                day_km = app.profile_manager.route_distance_for_date(profile["id"], date_str)
                 btn = Button(
-                    text=date_str,
+                    text=app.tr("day_distance", date=date_str, distance=f"{day_km:.1f}"),
                     font_name="NotoSansJP",
-                    font_size="18sp",
+                    font_size="16sp",
                     size_hint_y=None,
                     height=70,
                 )
@@ -656,7 +800,7 @@ class RouteListScreen(Screen):
             text=app.tr("back_to_profile_list"),
             font_name="NotoSansJP",
             font_size="16sp",
-            size_hint=(1, 0.12),
+            size_hint=(1, 0.1),
         )
         back_button.bind(on_press=self.go_back)
         root.add_widget(back_button)
@@ -666,7 +810,11 @@ class RouteListScreen(Screen):
     def show_map(self, date_str):
         app = App.get_running_app()
         app.selected_route_date = date_str
+        app.selected_route_dates = [date_str]
         self.manager.current = "map"
+
+    def go_to_calendar(self, instance):
+        self.manager.current = "calendar_range"
 
     def go_back(self, instance):
         self.manager.current = "profile_list"
@@ -709,17 +857,25 @@ class MapScreen(Screen):
 
         self.add_widget(root)
 
-    def _build_html(self, points, info_text=""):
+    def _build_html(self, segments_with_time, info_text="", total_distance_km=0.0):
+        """
+        segments_with_time: [[(time_label, lat, lon), ...], ...] (日付ごとのリストのリスト)
+        """
         app = App.get_running_app()
-        if not points:
-            coords_js = "[]"
+        has_points = any(len(seg) > 0 for seg in segments_with_time)
+
+        if not has_points:
+            segments_js = "[]"
             center_js = "[35.681236, 139.767125]"  # 東京駅(データが無い場合のデフォルト)
             banner = app.tr("map_no_points_banner")
         else:
-            coords_js = str([[lat, lon] for lat, lon in points])
-            # 記録を開始した地点(先頭の座標)を中心にする
-            center_js = str(list(points[0]))
-            banner = info_text
+            # [[[lat, lon, "HH:MM"], ...], ...] の形にする
+            segments_js = str(
+                [[[lat, lon, t] for t, lat, lon in seg] for seg in segments_with_time if seg]
+            )
+            first_seg = next(seg for seg in segments_with_time if seg)
+            center_js = str([first_seg[0][1], first_seg[0][2]])
+            banner = f"{info_text} - {total_distance_km:.1f} km"
 
         return f"""
 <!DOCTYPE html>
@@ -742,37 +898,81 @@ class MapScreen(Screen):
   <div id="map"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    var points = {coords_js};
+    var segments = {segments_js};
     var map = L.map('map').setView({center_js}, 15);
-    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+    // キャッシュを使わず常に最新のタイルを取得する
+    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png?t=' + Date.now(), {{
       attribution: '&copy; OpenStreetMap contributors'
     }}).addTo(map);
-    if (points.length > 0) {{
-      var line = L.polyline(points, {{color: 'blue', weight: 4}}).addTo(map);
-      map.fitBounds(line.getBounds());
-      L.marker(points[0]).addTo(map).bindPopup('スタート');
-      L.marker(points[points.length - 1]).addTo(map).bindPopup('ゴール');
+
+    var allBounds = [];
+    var colors = ['blue', 'red', 'green', 'purple', 'orange', 'darkcyan'];
+
+    segments.forEach(function(seg, segIndex) {{
+      if (seg.length === 0) return;
+      var latlngs = seg.map(function(p) {{ return [p[0], p[1]]; }});
+      var color = colors[segIndex % colors.length];
+      var line = L.polyline(latlngs, {{color: color, weight: 4}}).addTo(map);
+      allBounds.push(line.getBounds());
+
+      // 線をタップすると、一番近い座標の時刻を表示する
+      line.on('click', function(e) {{
+        var clickLatLng = e.latlng;
+        var nearest = seg[0];
+        var minDist = Infinity;
+        seg.forEach(function(p) {{
+          var d = map.distance(clickLatLng, [p[0], p[1]]);
+          if (d < minDist) {{ minDist = d; nearest = p; }}
+        }});
+        L.popup()
+          .setLatLng([nearest[0], nearest[1]])
+          .setContent(nearest[2])
+          .openOn(map);
+      }});
+
+      L.marker(latlngs[0]).addTo(map).bindPopup('Start: ' + seg[0][2]);
+      L.marker(latlngs[latlngs.length - 1]).addTo(map).bindPopup('End: ' + seg[seg.length - 1][2]);
+    }});
+
+    if (allBounds.length > 0) {{
+      var combined = allBounds[0];
+      for (var i = 1; i < allBounds.length; i++) {{
+        combined = combined.extend(allBounds[i]);
+      }}
+      map.fitBounds(combined);
     }}
   </script>
 </body>
 </html>
 """
 
-
     def show_map(self):
         app = App.get_running_app()
         profile = app.selected_profile
-        date_str = getattr(app, "selected_route_date", None)
+        dates = getattr(app, "selected_route_dates", None) or []
 
-        if not profile or not date_str:
+        if not profile or not dates:
             self.info_label.text = app.tr("map_no_data")
             return
 
-        points = app.profile_manager.load_route_points(profile["id"], date_str)
-        info_text = app.tr("map_info", name=profile["name"], date=date_str, count=len(points))
+        segments_with_time = [
+            app.profile_manager.load_route_points_with_time(profile["id"], d) for d in dates
+        ]
+        total_points = sum(len(seg) for seg in segments_with_time)
+        all_points_flat = [(lat, lon) for seg in segments_with_time for _, lat, lon in seg]
+        total_km = route_distance_km(all_points_flat)
+
+        date_label = dates[0] if len(dates) == 1 else f"{dates[-1]} - {dates[0]}"
+        info_text = app.tr("map_info", name=profile["name"], date=date_label, count=total_points)
         self.info_label.text = info_text
 
-        html = self._build_html(points, info_text)
+        # 時刻表示は設定したタイムゾーンに変換しておく
+        segments_local_time = [
+            [(app.format_time(ts), lat, lon) for ts, lat, lon in seg]
+            for seg in segments_with_time
+        ]
+
+        html = self._build_html(segments_local_time, info_text, total_km)
 
         try:
             from jnius import autoclass, PythonJavaClass, java_method
@@ -877,6 +1077,209 @@ class MapScreen(Screen):
 # ---------------------------------------------------------------
 # 画面6: 設定(言語選択)
 # ---------------------------------------------------------------
+class CalendarRangeScreen(Screen):
+    def on_pre_enter(self, *args):
+        today = datetime.now()
+        self.current_year = today.year
+        self.current_month = today.month
+        self.range_start = None
+        self.range_end = None
+        self.result_text = ""
+        self.build_ui()
+
+    def build_ui(self):
+        self.clear_widgets()
+        app = App.get_running_app()
+        root = BoxLayout(orientation="vertical", padding=15, spacing=10)
+
+        title = Label(
+            text=app.tr("calendar_title"),
+            font_size="20sp",
+            font_name="NotoSansJP",
+            size_hint=(1, 0.08),
+        )
+        root.add_widget(title)
+
+        nav_row = BoxLayout(orientation="horizontal", size_hint=(1, 0.08))
+        prev_btn = Button(text="<", font_size="20sp", size_hint=(0.2, 1))
+        prev_btn.bind(on_press=self.prev_month)
+        nav_row.add_widget(prev_btn)
+
+        month_label = Label(
+            text=f"{self.current_year}-{self.current_month:02d}",
+            font_size="18sp",
+            font_name="NotoSansJP",
+        )
+        nav_row.add_widget(month_label)
+
+        next_btn = Button(text=">", font_size="20sp", size_hint=(0.2, 1))
+        next_btn.bind(on_press=self.next_month)
+        nav_row.add_widget(next_btn)
+        root.add_widget(nav_row)
+
+        # 曜日ヘッダー
+        weekday_row = GridLayout(cols=7, size_hint=(1, 0.06))
+        for wd in ["月", "火", "水", "木", "金", "土", "日"]:
+            weekday_row.add_widget(
+                Label(text=wd, font_name="NotoSansJP", font_size="13sp")
+            )
+        root.add_widget(weekday_row)
+
+        # 日付グリッド
+        grid = GridLayout(cols=7, size_hint=(1, 0.38), spacing=3)
+        weeks = calendar.monthcalendar(self.current_year, self.current_month)
+        for week in weeks:
+            for day in week:
+                if day == 0:
+                    grid.add_widget(Label(text=""))
+                    continue
+                date_str = f"{self.current_year}-{self.current_month:02d}-{day:02d}"
+                is_in_range = (
+                    self.range_start and self.range_end
+                    and self.range_start <= date_str <= self.range_end
+                )
+                is_endpoint = date_str in (self.range_start, self.range_end)
+                if is_endpoint:
+                    color = (0.2, 0.6, 1, 1)
+                elif is_in_range:
+                    color = (0.5, 0.75, 1, 1)
+                else:
+                    color = (0.35, 0.35, 0.35, 1)
+                day_btn = Button(
+                    text=str(day),
+                    font_size="14sp",
+                    background_color=color,
+                )
+                day_btn.bind(on_press=lambda instance, d=date_str: self.select_date(d))
+                grid.add_widget(day_btn)
+        root.add_widget(grid)
+
+        start_text = self.range_start or app.tr("calendar_not_set")
+        end_text = self.range_end or app.tr("calendar_not_set")
+        status_label = Label(
+            text=f"{app.tr('calendar_start', date=start_text)}   {app.tr('calendar_end', date=end_text)}",
+            font_name="NotoSansJP",
+            font_size="15sp",
+            size_hint=(1, 0.08),
+        )
+        root.add_widget(status_label)
+
+        if self.result_text:
+            result_label = Label(
+                text=self.result_text,
+                font_name="NotoSansJP",
+                font_size="16sp",
+                size_hint=(1, 0.1),
+            )
+            root.add_widget(result_label)
+
+        action_row = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=8)
+        map_btn = Button(
+            text=app.tr("calendar_confirm_map"),
+            font_name="NotoSansJP",
+            font_size="15sp",
+        )
+        map_btn.bind(on_press=self.confirm_map)
+        action_row.add_widget(map_btn)
+
+        distance_btn = Button(
+            text=app.tr("calendar_confirm_distance"),
+            font_name="NotoSansJP",
+            font_size="15sp",
+        )
+        distance_btn.bind(on_press=self.confirm_distance)
+        action_row.add_widget(distance_btn)
+        root.add_widget(action_row)
+
+        bottom_row = BoxLayout(orientation="horizontal", size_hint=(1, 0.1), spacing=8)
+        reset_btn = Button(
+            text=app.tr("calendar_reset"),
+            font_name="NotoSansJP",
+            font_size="14sp",
+        )
+        reset_btn.bind(on_press=self.reset_selection)
+        bottom_row.add_widget(reset_btn)
+
+        back_btn = Button(
+            text=app.tr("back_to_profile_list"),
+            font_name="NotoSansJP",
+            font_size="14sp",
+        )
+        back_btn.bind(on_press=self.go_back)
+        bottom_row.add_widget(back_btn)
+        root.add_widget(bottom_row)
+
+        self.add_widget(root)
+
+    def prev_month(self, instance):
+        self.current_month -= 1
+        if self.current_month < 1:
+            self.current_month = 12
+            self.current_year -= 1
+        self.build_ui()
+
+    def next_month(self, instance):
+        self.current_month += 1
+        if self.current_month > 12:
+            self.current_month = 1
+            self.current_year += 1
+        self.build_ui()
+
+    def select_date(self, date_str):
+        if not self.range_start or (self.range_start and self.range_end):
+            self.range_start = date_str
+            self.range_end = None
+        elif date_str < self.range_start:
+            self.range_end = self.range_start
+            self.range_start = date_str
+        else:
+            self.range_end = date_str
+        self.result_text = ""
+        self.build_ui()
+
+    def reset_selection(self, instance):
+        self.range_start = None
+        self.range_end = None
+        self.result_text = ""
+        self.build_ui()
+
+    def _get_range(self):
+        if not self.range_start:
+            return None, None
+        end = self.range_end or self.range_start
+        return self.range_start, end
+
+    def confirm_map(self, instance):
+        app = App.get_running_app()
+        profile = app.selected_profile
+        start, end = self._get_range()
+        if not profile or not start:
+            return
+        dates = app.profile_manager.dates_in_range(profile["id"], start, end)
+        if not dates:
+            self.result_text = app.tr("calendar_no_data")
+            self.build_ui()
+            return
+        app.selected_route_dates = list(reversed(dates))  # 新しい日付が先頭に来るように
+        self.manager.current = "map"
+
+    def confirm_distance(self, instance):
+        app = App.get_running_app()
+        profile = app.selected_profile
+        start, end = self._get_range()
+        if not profile or not start:
+            return
+        distance = app.profile_manager.distance_km_in_range(profile["id"], start, end)
+        self.result_text = app.tr(
+            "range_distance_result", start=start, end=end, distance=f"{distance:.1f}"
+        )
+        self.build_ui()
+
+    def go_back(self, instance):
+        self.manager.current = "route_list"
+
+
+# ---------------------------------------------------------------
 class SettingsScreen(Screen):
     def on_pre_enter(self, *args):
         self.build_ui()
@@ -890,37 +1293,69 @@ class SettingsScreen(Screen):
             text=app.tr("settings_title"),
             font_size="22sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.15),
+            size_hint=(1, 0.1),
         )
         root.add_widget(title)
 
-        label = Label(
+        scroll = ScrollView(size_hint=(1, 0.75))
+        content = BoxLayout(orientation="vertical", spacing=15, size_hint_y=None, padding=5)
+        content.bind(minimum_height=content.setter("height"))
+
+        lang_label = Label(
             text=app.tr("language_label"),
             font_size="18sp",
             font_name="NotoSansJP",
-            size_hint=(1, 0.15),
+            size_hint_y=None,
+            height=40,
         )
-        root.add_widget(label)
+        content.add_widget(lang_label)
 
         ja_button = Button(
             text=app.tr("language_ja"),
             font_name="NotoSansJP",
             font_size="18sp",
-            size_hint=(1, 0.2),
+            size_hint_y=None,
+            height=60,
             background_color=(0.2, 0.6, 1, 1) if app.language == "ja" else (0.5, 0.5, 0.5, 1),
         )
         ja_button.bind(on_press=lambda instance: self.set_language("ja"))
-        root.add_widget(ja_button)
+        content.add_widget(ja_button)
 
         en_button = Button(
             text=app.tr("language_en"),
             font_name="NotoSansJP",
             font_size="18sp",
-            size_hint=(1, 0.2),
+            size_hint_y=None,
+            height=60,
             background_color=(0.2, 0.6, 1, 1) if app.language == "en" else (0.5, 0.5, 0.5, 1),
         )
         en_button.bind(on_press=lambda instance: self.set_language("en"))
-        root.add_widget(en_button)
+        content.add_widget(en_button)
+
+        tz_label = Label(
+            text=app.tr("timezone_label"),
+            font_size="18sp",
+            font_name="NotoSansJP",
+            size_hint_y=None,
+            height=40,
+        )
+        content.add_widget(tz_label)
+
+        for label_text, offset in TIMEZONE_CHOICES:
+            is_selected = app.timezone_offset == offset
+            tz_button = Button(
+                text=label_text,
+                font_name="NotoSansJP",
+                font_size="16sp",
+                size_hint_y=None,
+                height=55,
+                background_color=(0.2, 0.6, 1, 1) if is_selected else (0.5, 0.5, 0.5, 1),
+            )
+            tz_button.bind(on_press=lambda instance, o=offset: self.set_timezone(o))
+            content.add_widget(tz_button)
+
+        scroll.add_widget(content)
+        root.add_widget(scroll)
 
         back_button = Button(
             text=app.tr("back_to_profile_list"),
@@ -938,6 +1373,11 @@ class SettingsScreen(Screen):
         app.set_language(language)
         self.build_ui()
 
+    def set_timezone(self, offset):
+        app = App.get_running_app()
+        app.set_timezone_offset(offset)
+        self.build_ui()
+
     def go_back(self, instance):
         self.manager.current = "profile_list"
 
@@ -951,8 +1391,10 @@ class BikeTrackerApp(App):
         self.profile_manager = ProfileManager(self.user_data_dir)
         self.settings_manager = SettingsManager(self.user_data_dir)
         self.language = self.settings_manager.get_language()
+        self.timezone_offset = self.settings_manager.get_timezone_offset()
         self.selected_profile = None
         self.selected_route_date = None
+        self.selected_route_dates = []  # 期間指定で選ばれた複数日付
 
         sm = ScreenManager()
         sm.add_widget(ProfileListScreen(name="profile_list"))
@@ -961,6 +1403,7 @@ class BikeTrackerApp(App):
         sm.add_widget(RouteListScreen(name="route_list"))
         sm.add_widget(MapScreen(name="map"))
         sm.add_widget(SettingsScreen(name="settings"))
+        sm.add_widget(CalendarRangeScreen(name="calendar_range"))
         return sm
 
     def tr(self, key, **kwargs):
@@ -975,6 +1418,13 @@ class BikeTrackerApp(App):
     def set_language(self, language):
         self.language = language
         self.settings_manager.set_language(language)
+
+    def set_timezone_offset(self, offset_hours):
+        self.timezone_offset = offset_hours
+        self.settings_manager.set_timezone_offset(offset_hours)
+
+    def format_time(self, iso_str):
+        return format_time_in_offset(iso_str, self.timezone_offset)
 
     def on_start(self):
         try:

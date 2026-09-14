@@ -14,7 +14,7 @@ import os
 import csv
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
 from jnius import autoclass, cast, PythonJavaClass, java_method
 
@@ -46,7 +46,8 @@ def append_point(route_file, lat, lon):
     try:
         with open(route_file, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([datetime.now().isoformat(), lat, lon])
+            timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            writer.writerow([timestamp, lat, lon])
         log(f"座標を保存しました: {lat}, {lon}")
     except Exception as e:
         log(f"座標の保存に失敗: {e}")
