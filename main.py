@@ -625,6 +625,7 @@ class AddProfileScreen(Screen):
             font_size="18sp",
             size_hint=(1, 0.12),
             multiline=False,
+            input_type="text",
         )
         root.add_widget(self.name_input)
 
@@ -753,6 +754,7 @@ class AddPinScreen(Screen):
             font_size="16sp",
             size_hint=(1, 0.15),
             multiline=True,
+            input_type="text",
         )
         root.add_widget(self.text_input)
 
