@@ -21,6 +21,7 @@ import csv
 import math
 import calendar
 import base64
+import zipfile
 from datetime import datetime, timezone, timedelta
 
 from kivy.config import Config
@@ -173,6 +174,15 @@ TRANSLATIONS = {
         "calendar_no_data": "この期間の記録がありません",
         "range_distance_result": "{start} 〜 {end}\n走行距離: {distance} km",
         "close_button": "閉じる",
+        "backup_button": "バックアップ",
+        "import_button": "データをインポート",
+        "backup_success": "バックアップを保存しました:\n{path}",
+        "backup_failed": "バックアップに失敗しました: {error}",
+        "import_success": "「{name}」をインポートしました",
+        "import_failed": "インポートに失敗しました: {error}",
+        "import_invalid_file": "選択したファイルが正しいバックアップファイルではありません",
+        "importing": "インポート中...",
+        "exporting": "バックアップを作成中...",
         "add_pin_button": "ここにピンを立てる",
         "getting_location": "位置情報を取得中...",
         "location_failed": "位置情報の取得に失敗しました",
@@ -241,6 +251,15 @@ TRANSLATIONS = {
         "calendar_no_data": "No records in this date range",
         "range_distance_result": "{start} - {end}\nDistance: {distance} km",
         "close_button": "Close",
+        "backup_button": "Backup",
+        "import_button": "Import Data",
+        "backup_success": "Backup saved to:\n{path}",
+        "backup_failed": "Backup failed: {error}",
+        "import_success": "Imported \"{name}\"",
+        "import_failed": "Import failed: {error}",
+        "import_invalid_file": "The selected file is not a valid backup file",
+        "importing": "Importing...",
+        "exporting": "Creating backup...",
         "add_pin_button": "Add Pin Here",
         "getting_location": "Getting location...",
         "location_failed": "Failed to get location",
@@ -488,6 +507,126 @@ class PinManager:
 
 
 # ---------------------------------------------------------------
+# データ管理: プロファイル単位のバックアップ(エクスポート/インポート)
+# ---------------------------------------------------------------
+class BackupManager:
+    def __init__(self, profile_manager, pin_manager):
+        self.profile_manager = profile_manager
+        self.pin_manager = pin_manager
+
+    def get_export_dir(self):
+        """バックアップZIPの保存先(端末のアプリ専用外部保存領域)を返す"""
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            external_dir = activity.getExternalFilesDir(None)
+            if external_dir is not None:
+                path = os.path.join(external_dir.getAbsolutePath(), "exports")
+                os.makedirs(path, exist_ok=True)
+                return path
+        except Exception as e:
+            print(f"[DEBUG] 外部保存領域の取得に失敗: {e}")
+        # Android実機以外、または取得失敗時はアプリ内部のフォルダにフォールバック
+        path = os.path.join(self.profile_manager.base_dir, "exports")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def export_profile(self, profile_id):
+        profile = next(
+            (p for p in self.profile_manager.profiles if p["id"] == profile_id), None
+        )
+        if not profile:
+            raise ValueError("profile not found")
+
+        safe_name = "".join(c for c in profile["name"] if c.isalnum()) or "profile"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_dir = self.get_export_dir()
+        dest_path = os.path.join(dest_dir, f"{safe_name}_{timestamp}.biketracker.zip")
+
+        with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("profile.json", json.dumps(profile, ensure_ascii=False))
+
+            if profile.get("photo") and os.path.exists(profile["photo"]):
+                ext = os.path.splitext(profile["photo"])[1] or ".jpg"
+                zf.write(profile["photo"], f"photo{ext}")
+
+            routes_dir = os.path.join(self.profile_manager.routes_dir, profile_id)
+            if os.path.isdir(routes_dir):
+                for fname in os.listdir(routes_dir):
+                    zf.write(os.path.join(routes_dir, fname), f"routes/{fname}")
+
+            pins = self.pin_manager.load_pins(profile_id)
+            zf.writestr("pins.json", json.dumps(pins, ensure_ascii=False))
+            for pin in pins:
+                photo = pin.get("photo")
+                if photo and os.path.exists(photo):
+                    zf.write(photo, f"pin_photos/{os.path.basename(photo)}")
+
+        return dest_path
+
+    def import_profile(self, zip_path):
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = zf.namelist()
+            if "profile.json" not in names:
+                raise ValueError("invalid backup file")
+
+            profile_data = json.loads(zf.read("profile.json").decode("utf-8"))
+            new_id = str(uuid.uuid4())
+            new_name = profile_data.get("name", "Imported")
+
+            new_photo = None
+            for name in names:
+                if name.startswith("photo."):
+                    ext = os.path.splitext(name)[1]
+                    dest = os.path.join(self.profile_manager.photos_dir, new_id + ext)
+                    with zf.open(name) as src, open(dest, "wb") as dst:
+                        dst.write(src.read())
+                    new_photo = dest
+
+            new_profile = {"id": new_id, "name": new_name, "photo": new_photo}
+            self.profile_manager.profiles.append(new_profile)
+            self.profile_manager._save()
+
+            routes_dest_dir = os.path.join(self.profile_manager.routes_dir, new_id)
+            os.makedirs(routes_dest_dir, exist_ok=True)
+            for name in names:
+                if name.startswith("routes/") and not name.endswith("/"):
+                    fname = os.path.basename(name)
+                    with zf.open(name) as src, open(
+                        os.path.join(routes_dest_dir, fname), "wb"
+                    ) as dst:
+                        dst.write(src.read())
+
+            pins_data = []
+            if "pins.json" in names:
+                try:
+                    pins_data = json.loads(zf.read("pins.json").decode("utf-8"))
+                except Exception:
+                    pins_data = []
+
+            new_pins = []
+            for pin in pins_data:
+                new_pin_id = str(uuid.uuid4())
+                new_pin = dict(pin)
+                new_pin["id"] = new_pin_id
+                old_photo = pin.get("photo")
+                new_pin["photo"] = None
+                if old_photo:
+                    old_entry = f"pin_photos/{os.path.basename(old_photo)}"
+                    if old_entry in names:
+                        ext = os.path.splitext(old_photo)[1] or ".jpg"
+                        dest = os.path.join(self.pin_manager.photos_dir, new_pin_id + ext)
+                        with zf.open(old_entry) as src, open(dest, "wb") as dst:
+                            dst.write(src.read())
+                        new_pin["photo"] = dest
+                new_pins.append(new_pin)
+            self.pin_manager._save_pins(new_id, new_pins)
+
+            return new_profile
+
+
+# ---------------------------------------------------------------
 # 画面1: プロファイル一覧
 # ---------------------------------------------------------------
 class ProfileListScreen(Screen):
@@ -539,36 +678,94 @@ class ProfileListScreen(Screen):
         scroll.add_widget(grid)
         root.add_widget(scroll)
 
+        self.status_label = Label(text="", font_name="NotoSansJP", font_size="13sp", size_hint=(1, 0.06))
+        root.add_widget(self.status_label)
+
+        bottom_buttons = BoxLayout(orientation="horizontal", size_hint=(1, 0.12), spacing=10)
         add_button = Button(
             text=app.tr("add_profile_button"),
             font_name="NotoSansJP",
-            font_size="18sp",
-            size_hint=(1, 0.12),
+            font_size="16sp",
             background_color=(0.2, 0.6, 1, 1),
         )
         add_button.bind(on_press=self.go_to_add_profile)
-        root.add_widget(add_button)
+        bottom_buttons.add_widget(add_button)
+
+        import_button = Button(
+            text=app.tr("import_button"),
+            font_name="NotoSansJP",
+            font_size="16sp",
+        )
+        import_button.bind(on_press=self.import_data)
+        bottom_buttons.add_widget(import_button)
+        root.add_widget(bottom_buttons)
 
         self.add_widget(root)
 
     def go_to_settings(self, instance):
         self.manager.current = "settings"
 
+    def import_data(self, instance):
+        app = App.get_running_app()
+        if not PLYER_AVAILABLE:
+            self.status_label.text = app.tr("gallery_unavailable")
+            return
+        try:
+            filechooser.open_file(
+                on_selection=self._on_import_file_selected,
+                filters=[["ZIP", "*.zip"]],
+            )
+        except Exception as e:
+            self.status_label.text = app.tr("import_failed", error=e)
+
+    def _on_import_file_selected(self, selection):
+        if not selection or not selection[0]:
+            return
+        zip_path = selection[0]
+        Clock.schedule_once(lambda dt: self._do_import(zip_path))
+
+    def _do_import(self, zip_path):
+        app = App.get_running_app()
+        self.status_label.text = app.tr("importing")
+        try:
+            imported = app.backup_manager.import_profile(zip_path)
+            self.status_label.text = app.tr("import_success", name=imported["name"])
+        except (KeyError, ValueError, zipfile.BadZipFile):
+            self.status_label.text = app.tr("import_invalid_file")
+        except Exception as e:
+            print(f"[DEBUG] インポートに失敗: {e}")
+            self.status_label.text = app.tr("import_failed", error=e)
+        self.build_ui()
+
+    def export_profile(self, profile):
+        app = App.get_running_app()
+        self.status_label.text = app.tr("exporting")
+
+        def _do_export(dt):
+            try:
+                path = app.backup_manager.export_profile(profile["id"])
+                self.status_label.text = app.tr("backup_success", path=path)
+            except Exception as e:
+                print(f"[DEBUG] バックアップに失敗: {e}")
+                self.status_label.text = app.tr("backup_failed", error=e)
+
+        Clock.schedule_once(_do_export, 0.1)
+
     def _build_profile_card(self, profile):
         app = App.get_running_app()
-        card = BoxLayout(orientation="vertical", size_hint_y=None, height=230)
+        card = BoxLayout(orientation="vertical", size_hint_y=None, height=270)
 
         if profile.get("photo") and os.path.exists(profile["photo"]):
-            img = KivyImage(source=profile["photo"], size_hint=(1, 0.6))
+            img = KivyImage(source=profile["photo"], size_hint=(1, 0.52))
         else:
-            img = Label(text=app.tr("no_photo"), font_name="NotoSansJP", size_hint=(1, 0.6))
+            img = Label(text=app.tr("no_photo"), font_name="NotoSansJP", size_hint=(1, 0.52))
         card.add_widget(img)
 
         name_button = Button(
             text=profile["name"],
             font_name="NotoSansJP",
             font_size="16sp",
-            size_hint=(1, 0.22),
+            size_hint=(1, 0.18),
         )
         name_button.bind(
             on_press=lambda instance, p=profile: self.go_to_tracker(p)
@@ -579,12 +776,23 @@ class ProfileListScreen(Screen):
             text=app.tr("map_button"),
             font_name="NotoSansJP",
             font_size="14sp",
-            size_hint=(1, 0.18),
+            size_hint=(1, 0.15),
         )
         map_button.bind(
             on_press=lambda instance, p=profile: self.go_to_route_list(p)
         )
         card.add_widget(map_button)
+
+        backup_button = Button(
+            text=app.tr("backup_button"),
+            font_name="NotoSansJP",
+            font_size="13sp",
+            size_hint=(1, 0.15),
+        )
+        backup_button.bind(
+            on_press=lambda instance, p=profile: self.export_profile(p)
+        )
+        card.add_widget(backup_button)
 
         return card
 
@@ -2093,6 +2301,7 @@ class BikeTrackerApp(App):
         self.title = "バイク記録アプリ"
         self.profile_manager = ProfileManager(self.user_data_dir)
         self.pin_manager = PinManager(self.user_data_dir)
+        self.backup_manager = BackupManager(self.profile_manager, self.pin_manager)
         self.settings_manager = SettingsManager(self.user_data_dir)
         self.language = self.settings_manager.get_language()
         self.timezone_offset = self.settings_manager.get_timezone_offset()
