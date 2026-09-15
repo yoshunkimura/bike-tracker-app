@@ -23,6 +23,12 @@ import calendar
 import base64
 from datetime import datetime, timezone, timedelta
 
+from kivy.config import Config
+
+# Kivy標準のキーボードではなく、Android標準のキーボード(日本語IME等)を使う
+# Windowをインポートする前に設定する必要があるため、ここで行う
+Config.set("kivy", "keyboard_mode", "system")
+
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.boxlayout import BoxLayout
@@ -35,7 +41,6 @@ from kivy.uix.image import Image as KivyImage
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.core.text import LabelBase
-from kivy.config import Config
 
 try:
     from jnius import autoclass
@@ -49,8 +54,6 @@ LabelBase.register(
     fn_regular="fonts/NotoSansJP-Regular.ttf",
 )
 Config.set("kivy", "default_font", ["NotoSansJP", "fonts/NotoSansJP-Regular.ttf"])
-# Kivy標準のキーボードではなく、Android標準のキーボード(日本語IME等)を使う
-Config.set("kivy", "keyboard_mode", "system")
 
 try:
     from plyer import gps, filechooser
@@ -967,30 +970,83 @@ class TrackerScreen(Screen):
         if not app.selected_profile:
             self.status_label.text = app.tr("no_profile_selected")
             return
-        if not PLYER_AVAILABLE:
+        if not ANDROID_JNIUS_AVAILABLE:
             self.status_label.text = app.tr("location_failed")
             return
 
         self.status_label.text = app.tr("getting_location")
         try:
-            gps.configure(on_location=self._on_pin_location, on_status=lambda *a: None)
-            gps.start(minTime=1000, minDistance=0)
+            self._start_one_shot_location()
         except Exception as e:
             print(f"[DEBUG] ピン用GPS取得に失敗: {e}")
             self.status_label.text = app.tr("location_failed")
 
-    def _on_pin_location(self, **kwargs):
-        lat = kwargs.get("lat")
-        lon = kwargs.get("lon")
+    def _start_one_shot_location(self):
+        """
+        plyerのgps機能はAndroid 12以降のバッチ形式コールバックに対応しておらず、
+        NotImplementedErrorで位置情報を受け取れないため、独自のLocationListenerで
+        (service.pyと同様の方式)一度だけ位置情報を取得する。
+        """
+        from jnius import autoclass, cast, PythonJavaClass, java_method
+
+        Context = autoclass("android.content.Context")
+        LocationManager = autoclass("android.location.LocationManager")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+
+        location_manager = cast(
+            "android.location.LocationManager",
+            activity.getSystemService(Context.LOCATION_SERVICE),
+        )
+
+        screen = self
+
+        class OneShotLocationListener(PythonJavaClass):
+            __javainterfaces__ = ["android/location/LocationListener"]
+            __javacontext__ = "app"
+
+            @java_method("(Landroid/location/Location;)V", name="onLocationChanged")
+            def onLocationChanged_single(self, location):
+                screen._handle_pin_location(location.getLatitude(), location.getLongitude())
+
+            @java_method("(Ljava/util/List;)V", name="onLocationChanged")
+            def onLocationChanged_batch(self, locations):
+                if locations.size() > 0:
+                    loc = locations.get(locations.size() - 1)
+                    screen._handle_pin_location(loc.getLatitude(), loc.getLongitude())
+
+            @java_method("(Ljava/lang/String;)V")
+            def onProviderDisabled(self, provider):
+                pass
+
+            @java_method("(Ljava/lang/String;)V")
+            def onProviderEnabled(self, provider):
+                pass
+
+            @java_method("(Ljava/lang/String;ILandroid/os/Bundle;)V")
+            def onStatusChanged(self, provider, status, extras):
+                pass
+
+        self._pin_location_listener = OneShotLocationListener()
+        location_manager.requestLocationUpdates(
+            LocationManager.GPS_PROVIDER, 1000, 0, self._pin_location_listener, activity.getMainLooper()
+        )
+
+    def _handle_pin_location(self, lat, lon):
+        # 1回受け取ったら以降の更新は不要なので停止する
         try:
-            gps.stop()
-        except Exception:
-            pass
-        if lat is None or lon is None:
-            Clock.schedule_once(
-                lambda dt: setattr(self.status_label, "text", App.get_running_app().tr("location_failed"))
+            from jnius import autoclass, cast
+
+            Context = autoclass("android.content.Context")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+            location_manager = cast(
+                "android.location.LocationManager",
+                activity.getSystemService(Context.LOCATION_SERVICE),
             )
-            return
+            location_manager.removeUpdates(self._pin_location_listener)
+        except Exception as e:
+            print(f"[DEBUG] 位置情報リスナーの停止に失敗: {e}")
 
         def _go_to_add_pin(dt):
             app = App.get_running_app()
