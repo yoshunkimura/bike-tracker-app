@@ -405,7 +405,7 @@ class ProfileManager:
 # データ管理: ピン(地図上の写真付きマーカー)の保存・読み込み
 # ---------------------------------------------------------------
 class PinManager:
-    MAX_EMBED_BYTES = 1.5 * 1024 * 1024  # 地図に埋め込む際のファイルサイズ上限(これを超えると写真は省略)
+    MAX_EMBED_BYTES = 6 * 1024 * 1024  # 地図に埋め込む際のファイルサイズ上限(これを超えると写真は省略)
 
     def __init__(self, base_dir):
         self.base_dir = base_dir
@@ -472,7 +472,7 @@ class PinManager:
             if os.path.getsize(photo) > self.MAX_EMBED_BYTES:
                 # 大きすぎる写真は地図の読み込みが重くなるため埋め込みを省略する
                 print(f"[DEBUG] 写真サイズが大きいため地図への埋め込みを省略: {photo}")
-                return None
+                return "TOO_LARGE"
             ext = os.path.splitext(photo)[1].lower()
             mime = "image/png" if ext == ".png" else "image/jpeg"
             with open(photo, "rb") as f:
@@ -1302,7 +1302,9 @@ class MapScreen(Screen):
     pins.forEach(function(pin) {{
       var marker = L.marker([pin.lat, pin.lon], {{icon: pinIcon}}).addTo(map);
       var html = '<div class="pin-popup">';
-      if (pin.photo) {{
+      if (pin.photo === 'TOO_LARGE') {{
+        html += '<p style="color:#888;">(写真サイズが大きいため表示できません)</p>';
+      }} else if (pin.photo) {{
         html += '<img src="' + pin.photo + '">';
       }}
       html += '<p>' + (pin.text || '') + '</p></div>';
