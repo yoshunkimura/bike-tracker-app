@@ -1249,6 +1249,20 @@ class MapScreen(Screen):
         ]
         pins_js = json.dumps(pins_data, ensure_ascii=False)
 
+        # 再生機能用: 日付をまたいで時系列順に並べたフラットな座標リスト(累積距離付き)
+        playback_points = []
+        cumulative_km = 0.0
+        prev = None
+        for seg in segments_with_time:
+            for t, lat, lon in seg:
+                if prev is not None:
+                    cumulative_km += haversine_km(prev[0], prev[1], lat, lon)
+                playback_points.append(
+                    {"lat": lat, "lon": lon, "time": t, "distance_km": round(cumulative_km, 2)}
+                )
+                prev = (lat, lon)
+        playback_js = json.dumps(playback_points, ensure_ascii=False)
+
         return f"""
 <!DOCTYPE html>
 <html>
@@ -1265,11 +1279,51 @@ class MapScreen(Screen):
     }}
     .pin-popup img {{ max-width: 200px; max-height: 200px; display: block; margin-bottom: 6px; }}
     .pin-popup p {{ margin: 0; white-space: pre-wrap; }}
+    #playback-info {{
+      position: fixed; top: 40px; left: 0; right: 0; z-index: 1000;
+      display: none; pointer-events: none;
+    }}
+    #playback-time {{
+      position: absolute; top: 0; left: 8px;
+      background: rgba(0,0,0,0.6); color: white; padding: 4px 10px;
+      border-radius: 4px; font-size: 14px;
+    }}
+    #playback-distance {{
+      position: absolute; top: 0; right: 8px;
+      background: rgba(0,0,0,0.6); color: white; padding: 4px 10px;
+      border-radius: 4px; font-size: 14px;
+    }}
+    #playback-controls {{
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      z-index: 1000; background: rgba(0,0,0,0.7); border-radius: 8px;
+      padding: 8px; display: flex; gap: 6px; align-items: center;
+    }}
+    #playback-controls button {{
+      background: #1976D2; color: white; border: none; border-radius: 4px;
+      padding: 8px 12px; font-size: 14px;
+    }}
+    #playback-controls button.active {{ background: #F57C00; }}
+    #pin-closeup {{
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 2000;
+      display: none; background: rgba(0,0,0,0.85);
+      flex-direction: column; align-items: center; justify-content: center;
+    }}
+    #pin-closeup img {{ max-width: 90%; max-height: 65%; border-radius: 8px; }}
+    #pin-closeup p {{
+      color: white; font-size: 18px; margin-top: 16px; padding: 0 20px;
+      text-align: center; white-space: pre-wrap;
+    }}
   </style>
 </head>
 <body>
   <div id="banner">{banner}</div>
   <div id="map"></div>
+  <div id="playback-info">
+    <div id="playback-time"></div>
+    <div id="playback-distance"></div>
+  </div>
+  <div id="pin-closeup"><img id="pin-closeup-img"><p id="pin-closeup-text"></p></div>
+  <div id="playback-controls"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     var segments = {segments_js};
@@ -1334,6 +1388,127 @@ class MapScreen(Screen):
         combined = combined.extend(allBounds[i]);
       }}
       map.fitBounds(combined);
+    }}
+
+    // ---------------- 再生機能 ----------------
+    var playbackPoints = {playback_js};
+    var playbackSpeed = 6;
+    var playbackTimer = null;
+    var playbackIndex = 0;
+    var playbackMarker = null;
+    var shownPins = {{}};  // 一度クローズアップ表示したピンは再度表示しない(id代わりにインデックス)
+    var basestepMs = 3000; // 実際の記録間隔の目安(約3秒)
+
+    var bikeIcon = L.divIcon({{
+      html: '🏍️', className: '', iconSize: [28, 28], iconAnchor: [14, 14]
+    }});
+
+    function nearestPinWithin(lat, lon, meters) {{
+      for (var i = 0; i < pins.length; i++) {{
+        if (shownPins[i]) continue;
+        var d = map.distance([lat, lon], [pins[i].lat, pins[i].lon]);
+        if (d <= meters) return i;
+      }}
+      return -1;
+    }}
+
+    function showPinCloseup(pinIndex, callback) {{
+      var pin = pins[pinIndex];
+      shownPins[pinIndex] = true;
+      var closeup = document.getElementById('pin-closeup');
+      var img = document.getElementById('pin-closeup-img');
+      var text = document.getElementById('pin-closeup-text');
+      if (pin.photo && pin.photo !== 'TOO_LARGE') {{
+        img.src = pin.photo;
+        img.style.display = 'block';
+      }} else {{
+        img.style.display = 'none';
+      }}
+      text.textContent = pin.text || '';
+      closeup.style.display = 'flex';
+      setTimeout(function() {{
+        closeup.style.display = 'none';
+        callback();
+      }}, 2000);
+    }}
+
+    function playbackStep() {{
+      if (playbackIndex >= playbackPoints.length) {{
+        stopPlayback();
+        return;
+      }}
+      var p = playbackPoints[playbackIndex];
+      var latlng = [p.lat, p.lon];
+
+      if (!playbackMarker) {{
+        playbackMarker = L.marker(latlng, {{icon: bikeIcon}}).addTo(map);
+      }} else {{
+        playbackMarker.setLatLng(latlng);
+      }}
+      map.panTo(latlng, {{animate: true, duration: 0.3}});
+
+      document.getElementById('playback-time').textContent = p.time;
+      document.getElementById('playback-distance').textContent = p.distance_km.toFixed(1) + ' km';
+
+      var nearPin = nearestPinWithin(p.lat, p.lon, 30);
+      playbackIndex++;
+
+      if (nearPin >= 0) {{
+        clearTimeout(playbackTimer);
+        showPinCloseup(nearPin, function() {{
+          if (playbackIndex < playbackPoints.length) {{
+            playbackTimer = setTimeout(playbackStep, basestepMs / playbackSpeed);
+          }} else {{
+            stopPlayback();
+          }}
+        }});
+      }} else {{
+        playbackTimer = setTimeout(playbackStep, basestepMs / playbackSpeed);
+      }}
+    }}
+
+    function startPlayback() {{
+      if (playbackPoints.length === 0) return;
+      playbackIndex = 0;
+      shownPins = {{}};
+      if (playbackMarker) {{ map.removeLayer(playbackMarker); playbackMarker = null; }}
+      document.getElementById('playback-info').style.display = 'block';
+      playbackStep();
+    }}
+
+    function stopPlayback() {{
+      clearTimeout(playbackTimer);
+      playbackTimer = null;
+      document.getElementById('playback-info').style.display = 'none';
+      if (playbackMarker) {{ map.removeLayer(playbackMarker); playbackMarker = null; }}
+    }}
+
+    // 再生コントロールのボタンを組み立てる
+    var controls = document.getElementById('playback-controls');
+    if (playbackPoints.length > 0) {{
+      var playBtn = document.createElement('button');
+      playBtn.textContent = '▶ 再生';
+      playBtn.onclick = function() {{ startPlayback(); }};
+      controls.appendChild(playBtn);
+
+      var stopBtn = document.createElement('button');
+      stopBtn.textContent = '■ 停止';
+      stopBtn.onclick = function() {{ stopPlayback(); }};
+      controls.appendChild(stopBtn);
+
+      [1, 6, 20, 40].forEach(function(speed) {{
+        var btn = document.createElement('button');
+        btn.textContent = speed + 'x';
+        if (speed === playbackSpeed) btn.classList.add('active');
+        btn.onclick = function() {{
+          playbackSpeed = speed;
+          Array.from(controls.querySelectorAll('button')).forEach(function(b) {{
+            b.classList.remove('active');
+          }});
+          btn.classList.add('active');
+        }};
+        controls.appendChild(btn);
+      }});
     }}
   </script>
 </body>
