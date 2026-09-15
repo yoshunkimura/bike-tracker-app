@@ -179,6 +179,8 @@ TRANSLATIONS = {
         "add_pin_title": "ピンを追加",
         "pin_location_label": "緯度: {lat}\n経度: {lon}",
         "pin_text_hint": "メモ(例: ここで休憩した)",
+        "pin_photo_size_hint": "写真は最大10MBまでです",
+        "photo_too_large": "写真サイズが大きすぎます(10MB以下の写真を選んでください)",
         "map_add_pin_button": "+ ピン",
         "map_pin_getting_location": "地図の中心位置を取得中...",
         "map_confirm_pin_button": "ここに追加",
@@ -245,6 +247,8 @@ TRANSLATIONS = {
         "add_pin_title": "Add Pin",
         "pin_location_label": "Lat: {lat}\nLon: {lon}",
         "pin_text_hint": "Memo (e.g. rested here)",
+        "pin_photo_size_hint": "Photos up to 10MB",
+        "photo_too_large": "Photo is too large (please choose one under 10MB)",
         "map_add_pin_button": "+ Pin",
         "map_pin_getting_location": "Getting map center...",
         "map_confirm_pin_button": "Place Here",
@@ -405,7 +409,7 @@ class ProfileManager:
 # データ管理: ピン(地図上の写真付きマーカー)の保存・読み込み
 # ---------------------------------------------------------------
 class PinManager:
-    MAX_EMBED_BYTES = 6 * 1024 * 1024  # 地図に埋め込む際のファイルサイズ上限(これを超えると写真は省略)
+    MAX_EMBED_BYTES = 10 * 1024 * 1024  # 地図に埋め込む際のファイルサイズ上限(これを超えると写真は省略)
 
     def __init__(self, base_dir):
         self.base_dir = base_dir
@@ -770,6 +774,15 @@ class AddPinScreen(Screen):
         gallery_button.bind(on_press=self.pick_from_gallery)
         root.add_widget(gallery_button)
 
+        size_hint_label = Label(
+            text=app.tr("pin_photo_size_hint"),
+            font_name="NotoSansJP",
+            font_size="12sp",
+            color=(0.6, 0.6, 0.6, 1),
+            size_hint=(1, 0.05),
+        )
+        root.add_widget(size_hint_label)
+
         self.status_label = Label(text="", font_name="NotoSansJP", size_hint=(1, 0.08))
         root.add_widget(self.status_label)
 
@@ -822,7 +835,10 @@ class AddPinScreen(Screen):
             self.selected_photo_path = path
             self.preview_image.source = path
             self.preview_image.reload()
-            self.status_label.text = app.tr("photo_selected")
+            if os.path.getsize(path) > PinManager.MAX_EMBED_BYTES:
+                self.status_label.text = app.tr("photo_too_large")
+            else:
+                self.status_label.text = app.tr("photo_selected")
         except Exception as e:
             self.status_label.text = app.tr("preview_error", error=e)
 
