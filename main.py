@@ -1294,7 +1294,7 @@ class MapScreen(Screen):
       border-radius: 4px; font-size: 14px;
     }}
     #playback-controls {{
-      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
       z-index: 1000; background: rgba(0,0,0,0.7); border-radius: 8px;
       padding: 8px; display: flex; gap: 6px; align-items: center;
     }}
