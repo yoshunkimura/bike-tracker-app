@@ -853,7 +853,9 @@ class ProfileListScreen(Screen):
                     uri = data.getData()
                     resolver = mactivity.getContentResolver()
                     out_stream = resolver.openOutputStream(uri)
-                    out_stream.write(zip_bytes)
+                    print(f"[DEBUG] 書き込むデータサイズ: {len(zip_bytes)} bytes")
+                    out_stream.write(zip_bytes, 0, len(zip_bytes))
+                    out_stream.flush()
                     out_stream.close()
                     display_path = uri.toString()
                     Clock.schedule_once(
