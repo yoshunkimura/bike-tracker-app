@@ -775,9 +775,10 @@ class ProfileListScreen(Screen):
                     Clock.schedule_once(lambda dt: self._do_import(zip_bytes))
                 except Exception as e:
                     print(f"[DEBUG] ファイル内容の読み込みに失敗: {e}")
+                    error_message = app.tr("import_failed", error=e)
                     Clock.schedule_once(
                         lambda dt: setattr(
-                            self.status_label, "text", app.tr("import_failed", error=e)
+                            self.status_label, "text", error_message
                         )
                     )
 
@@ -867,9 +868,10 @@ class ProfileListScreen(Screen):
                     )
                 except Exception as e:
                     print(f"[DEBUG] 保存先への書き込みに失敗: {e}")
+                    error_message = app.tr("backup_failed", error=e)
                     Clock.schedule_once(
                         lambda dt: setattr(
-                            self.status_label, "text", app.tr("backup_failed", error=e)
+                            self.status_label, "text", error_message
                         )
                     )
 
@@ -883,8 +885,6 @@ class ProfileListScreen(Screen):
                 self.status_label.text = app.tr("backup_success", path=path)
             except Exception as e2:
                 self.status_label.text = app.tr("backup_failed", error=e2)
-
-        Clock.schedule_once(_do_export, 0.1)
 
     def _build_profile_card(self, profile):
         app = App.get_running_app()
