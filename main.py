@@ -717,30 +717,62 @@ class ProfileListScreen(Screen):
 
     def import_data(self, instance):
         app = App.get_running_app()
-        if not PLYER_AVAILABLE:
-            self.status_label.text = app.tr("gallery_unavailable")
-            return
         try:
-            print("[DEBUG] インポート用filechooserを呼び出します")
-            filechooser.open_file(
-                on_selection=self._on_import_file_selected,
-                filters=[["ZIP", "*.zip"]],
-            )
+            from jnius import autoclass
+            from android import activity
+
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            mactivity = PythonActivity.mActivity
+
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+
+            request_code = 9002
+
+            def on_result(request_code_recv, result_code, data):
+                if request_code_recv != request_code:
+                    return
+                activity.unbind(on_activity_result=on_result)
+                Activity = autoclass("android.app.Activity")
+                if result_code != Activity.RESULT_OK or data is None:
+                    print("[DEBUG] インポート用ファイル選択がキャンセルされました")
+                    return
+                try:
+                    uri = data.getData()
+                    print(f"[DEBUG] インポート用に選択されたURI: {uri.toString()}")
+                    resolver = mactivity.getContentResolver()
+                    pfd = resolver.openFileDescriptor(uri, "r")
+                    try:
+                        fd = pfd.getFd()
+                        with os.fdopen(fd, "rb", closefd=False) as f:
+                            zip_bytes = f.read()
+                    finally:
+                        pfd.close()
+                    print(f"[DEBUG] 読み込んだデータサイズ: {len(zip_bytes)} bytes")
+                    Clock.schedule_once(lambda dt: self._do_import(zip_bytes))
+                except Exception as e:
+                    print(f"[DEBUG] ファイル内容の読み込みに失敗: {e}")
+                    Clock.schedule_once(
+                        lambda dt: setattr(
+                            self.status_label, "text", app.tr("import_failed", error=e)
+                        )
+                    )
+
+            activity.bind(on_activity_result=on_result)
+            mactivity.startActivityForResult(intent, request_code)
         except Exception as e:
+            print(f"[DEBUG] ファイル選択ダイアログの表示に失敗: {e}")
             self.status_label.text = app.tr("import_failed", error=e)
 
-    def _on_import_file_selected(self, selection):
-        print(f"[DEBUG] インポート用ファイル選択結果: {selection!r}")
-        if not selection or not selection[0]:
-            return
-        zip_path = selection[0]
-        Clock.schedule_once(lambda dt: self._do_import(zip_path))
-
-    def _do_import(self, zip_path):
+    def _do_import(self, zip_bytes):
         app = App.get_running_app()
-        print(f"[DEBUG] インポート開始: {zip_path}")
+        print(f"[DEBUG] インポート開始: {len(zip_bytes)} bytes")
         try:
-            imported = app.backup_manager.import_profile(zip_path)
+            import io
+
+            imported = app.backup_manager.import_profile(io.BytesIO(zip_bytes))
             print(f"[DEBUG] インポート成功: {imported['name']}")
             message = app.tr("import_success", name=imported["name"])
         except (KeyError, ValueError, zipfile.BadZipFile) as e:
