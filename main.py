@@ -743,13 +743,19 @@ class ProfileListScreen(Screen):
                     uri = data.getData()
                     print(f"[DEBUG] インポート用に選択されたURI: {uri.toString()}")
                     resolver = mactivity.getContentResolver()
-                    pfd = resolver.openFileDescriptor(uri, "r")
-                    try:
-                        fd = pfd.getFd()
-                        with os.fdopen(fd, "rb", closefd=False) as f:
-                            zip_bytes = f.read()
-                    finally:
-                        pfd.close()
+
+                    # openFileDescriptorはGoogleドライブ等のクラウドストレージで
+                    # 正しく機能しないことがあるため、ストリーム読み込みを使う
+                    ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+                    input_stream = resolver.openInputStream(uri)
+                    output_stream = ByteArrayOutputStream()
+                    buf = bytearray(8192)
+                    n = input_stream.read(buf)
+                    while n != -1:
+                        output_stream.write(buf, 0, n)
+                        n = input_stream.read(buf)
+                    input_stream.close()
+                    zip_bytes = bytes(output_stream.toByteArray())
                     print(f"[DEBUG] 読み込んだデータサイズ: {len(zip_bytes)} bytes")
                     Clock.schedule_once(lambda dt: self._do_import(zip_bytes))
                 except Exception as e:
