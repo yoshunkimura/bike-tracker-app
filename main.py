@@ -721,6 +721,7 @@ class ProfileListScreen(Screen):
             self.status_label.text = app.tr("gallery_unavailable")
             return
         try:
+            print("[DEBUG] インポート用filechooserを呼び出します")
             filechooser.open_file(
                 on_selection=self._on_import_file_selected,
                 filters=[["ZIP", "*.zip"]],
@@ -729,6 +730,7 @@ class ProfileListScreen(Screen):
             self.status_label.text = app.tr("import_failed", error=e)
 
     def _on_import_file_selected(self, selection):
+        print(f"[DEBUG] インポート用ファイル選択結果: {selection!r}")
         if not selection or not selection[0]:
             return
         zip_path = selection[0]
@@ -736,16 +738,22 @@ class ProfileListScreen(Screen):
 
     def _do_import(self, zip_path):
         app = App.get_running_app()
-        self.status_label.text = app.tr("importing")
+        print(f"[DEBUG] インポート開始: {zip_path}")
         try:
             imported = app.backup_manager.import_profile(zip_path)
-            self.status_label.text = app.tr("import_success", name=imported["name"])
-        except (KeyError, ValueError, zipfile.BadZipFile):
-            self.status_label.text = app.tr("import_invalid_file")
+            print(f"[DEBUG] インポート成功: {imported['name']}")
+            message = app.tr("import_success", name=imported["name"])
+        except (KeyError, ValueError, zipfile.BadZipFile) as e:
+            print(f"[DEBUG] インポート失敗(不正なファイル): {e}")
+            message = app.tr("import_invalid_file")
         except Exception as e:
             print(f"[DEBUG] インポートに失敗: {e}")
-            self.status_label.text = app.tr("import_failed", error=e)
+            message = app.tr("import_failed", error=e)
+
+        # 先に画面を再構築してから、新しく作られたラベルにメッセージを設定する
+        # (逆順にすると、再構築時に作られる空のラベルでメッセージが消えてしまう)
         self.build_ui()
+        self.status_label.text = message
 
     def export_profile(self, profile):
         app = App.get_running_app()
