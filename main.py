@@ -22,6 +22,7 @@ import math
 import calendar
 import base64
 import zipfile
+import shutil
 from datetime import datetime, timezone, timedelta
 
 from kivy.config import Config
@@ -39,6 +40,8 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.image import Image as KivyImage
+from kivy.uix.popup import Popup
+from kivy.uix.behaviors import ButtonBehavior
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.core.text import LabelBase
@@ -175,6 +178,10 @@ TRANSLATIONS = {
         "range_distance_result": "{start} 〜 {end}\n走行距離: {distance} km",
         "close_button": "閉じる",
         "backup_button": "バックアップ",
+        "delete_profile_confirm": "「{name}」を削除しますか?\nすべての走行記録・写真・ピンも削除されます",
+        "yes_button": "はい",
+        "no_button": "いいえ",
+        "profile_deleted": "「{name}」を削除しました",
         "import_button": "データをインポート",
         "backup_success": "バックアップを保存しました:\n{path}",
         "backup_failed": "バックアップに失敗しました: {error}",
@@ -252,6 +259,10 @@ TRANSLATIONS = {
         "range_distance_result": "{start} - {end}\nDistance: {distance} km",
         "close_button": "Close",
         "backup_button": "Backup",
+        "delete_profile_confirm": "Delete \"{name}\"?\nAll routes, photos, and pins will also be deleted",
+        "yes_button": "Yes",
+        "no_button": "No",
+        "profile_deleted": "Deleted \"{name}\"",
         "import_button": "Import Data",
         "backup_success": "Backup saved to:\n{path}",
         "backup_failed": "Backup failed: {error}",
@@ -313,6 +324,33 @@ class SettingsManager:
 
 
 # ---------------------------------------------------------------
+# 長押し(ロングプレス)を検知できるコンテナウィジェット
+# ---------------------------------------------------------------
+class LongPressArea(ButtonBehavior, BoxLayout):
+    LONG_PRESS_SECONDS = 0.6
+
+    def __init__(self, on_long_press=None, **kwargs):
+        super().__init__(**kwargs)
+        self.on_long_press_callback = on_long_press
+        self._long_press_event = None
+        self._triggered = False
+
+    def on_press(self):
+        self._triggered = False
+        self._long_press_event = Clock.schedule_once(self._fire_long_press, self.LONG_PRESS_SECONDS)
+
+    def on_release(self):
+        if self._long_press_event:
+            self._long_press_event.cancel()
+            self._long_press_event = None
+
+    def _fire_long_press(self, dt):
+        self._triggered = True
+        if self.on_long_press_callback:
+            self.on_long_press_callback()
+
+
+# ---------------------------------------------------------------
 # データ管理: プロファイルの保存・読み込み、走行記録ファイルの管理
 # ---------------------------------------------------------------
 class ProfileManager:
@@ -354,6 +392,24 @@ class ProfileManager:
         self.profiles.append(profile)
         self._save()
         return profile
+
+    def delete_profile(self, profile_id):
+        profile = next((p for p in self.profiles if p["id"] == profile_id), None)
+        if not profile:
+            return
+
+        if profile.get("photo") and os.path.exists(profile["photo"]):
+            try:
+                os.remove(profile["photo"])
+            except Exception as e:
+                print(f"[DEBUG] プロファイル写真の削除に失敗: {e}")
+
+        routes_dir = os.path.join(self.routes_dir, profile_id)
+        if os.path.isdir(routes_dir):
+            shutil.rmtree(routes_dir, ignore_errors=True)
+
+        self.profiles = [p for p in self.profiles if p["id"] != profile_id]
+        self._save()
 
     def route_file_for(self, profile_id):
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -486,6 +542,23 @@ class PinManager:
         pins.append(pin)
         self._save_pins(profile_id, pins)
         return pin
+
+    def delete_pins_for_profile(self, profile_id):
+        pins = self.load_pins(profile_id)
+        for pin in pins:
+            photo = pin.get("photo")
+            if photo and os.path.exists(photo):
+                try:
+                    os.remove(photo)
+                except Exception as e:
+                    print(f"[DEBUG] ピン写真の削除に失敗: {e}")
+
+        pins_file = self._pins_file(profile_id)
+        if os.path.exists(pins_file):
+            try:
+                os.remove(pins_file)
+            except Exception as e:
+                print(f"[DEBUG] ピン情報ファイルの削除に失敗: {e}")
 
     def photo_as_data_uri(self, pin):
         photo = pin.get("photo")
@@ -634,6 +707,50 @@ class BackupManager:
             self.pin_manager._save_pins(new_id, new_pins)
 
             return new_profile
+
+
+class LongPressImage(ButtonBehavior, KivyImage):
+    """一定時間押し続けると on_long_press を呼ぶ画像ウィジェット"""
+
+    def __init__(self, on_long_press=None, **kwargs):
+        super().__init__(**kwargs)
+        self._on_long_press = on_long_press
+        self._long_press_event = None
+
+    def on_press(self):
+        self._long_press_event = Clock.schedule_once(self._fire_long_press, 0.6)
+
+    def on_release(self):
+        if self._long_press_event:
+            self._long_press_event.cancel()
+            self._long_press_event = None
+
+    def _fire_long_press(self, dt):
+        self._long_press_event = None
+        if self._on_long_press:
+            self._on_long_press()
+
+
+class LongPressLabel(ButtonBehavior, Label):
+    """写真が無いプロファイル用: 長押しを検出するラベル"""
+
+    def __init__(self, on_long_press=None, **kwargs):
+        super().__init__(**kwargs)
+        self._on_long_press = on_long_press
+        self._long_press_event = None
+
+    def on_press(self):
+        self._long_press_event = Clock.schedule_once(self._fire_long_press, 0.6)
+
+    def on_release(self):
+        if self._long_press_event:
+            self._long_press_event.cancel()
+            self._long_press_event = None
+
+    def _fire_long_press(self, dt):
+        self._long_press_event = None
+        if self._on_long_press:
+            self._on_long_press()
 
 
 # ---------------------------------------------------------------
@@ -809,6 +926,46 @@ class ProfileListScreen(Screen):
         self.build_ui()
         self.status_label.text = message
 
+    def _confirm_delete_profile(self, profile):
+        app = App.get_running_app()
+
+        content = BoxLayout(orientation="vertical", spacing=15, padding=15)
+        message_label = Label(
+            text=app.tr("delete_profile_confirm", name=profile["name"]),
+            font_name="NotoSansJP",
+            font_size="15sp",
+            halign="center",
+        )
+        message_label.bind(size=lambda inst, val: setattr(inst, "text_size", val))
+        content.add_widget(message_label)
+
+        button_row = BoxLayout(orientation="horizontal", spacing=10, size_hint=(1, 0.4))
+        content.add_widget(button_row)
+
+        popup = Popup(
+            title="",
+            content=content,
+            size_hint=(0.85, 0.4),
+            auto_dismiss=True,
+        )
+
+        def do_delete(instance):
+            popup.dismiss()
+            app.profile_manager.delete_profile(profile["id"])
+            app.pin_manager.delete_pins_for_profile(profile["id"])
+            self.build_ui()
+            self.status_label.text = app.tr("profile_deleted", name=profile["name"])
+
+        yes_button = Button(text=app.tr("yes_button"), font_name="NotoSansJP")
+        yes_button.bind(on_press=do_delete)
+        button_row.add_widget(yes_button)
+
+        no_button = Button(text=app.tr("no_button"), font_name="NotoSansJP")
+        no_button.bind(on_press=lambda instance: popup.dismiss())
+        button_row.add_widget(no_button)
+
+        popup.open()
+
     def export_profile(self, profile):
         app = App.get_running_app()
         self.status_label.text = app.tr("exporting")
@@ -891,9 +1048,18 @@ class ProfileListScreen(Screen):
         card = BoxLayout(orientation="vertical", size_hint_y=None, height=270)
 
         if profile.get("photo") and os.path.exists(profile["photo"]):
-            img = KivyImage(source=profile["photo"], size_hint=(1, 0.52))
+            img = LongPressImage(
+                source=profile["photo"],
+                size_hint=(1, 0.52),
+                on_long_press=lambda p=profile: self._confirm_delete_profile(p),
+            )
         else:
-            img = Label(text=app.tr("no_photo"), font_name="NotoSansJP", size_hint=(1, 0.52))
+            img = LongPressLabel(
+                text=app.tr("no_photo"),
+                font_name="NotoSansJP",
+                size_hint=(1, 0.52),
+                on_long_press=lambda p=profile: self._confirm_delete_profile(p),
+            )
         card.add_widget(img)
 
         name_button = Button(
