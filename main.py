@@ -532,19 +532,18 @@ class BackupManager:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def export_profile(self, profile_id):
+    def build_zip_bytes(self, profile_id):
+        """プロファイルのデータをZIP形式のバイト列として組み立てて返す"""
+        import io
+
         profile = next(
             (p for p in self.profile_manager.profiles if p["id"] == profile_id), None
         )
         if not profile:
             raise ValueError("profile not found")
 
-        safe_name = "".join(c for c in profile["name"] if c.isalnum()) or "profile"
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest_dir = self.get_export_dir()
-        dest_path = os.path.join(dest_dir, f"{safe_name}_{timestamp}.biketracker.zip")
-
-        with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("profile.json", json.dumps(profile, ensure_ascii=False))
 
             if profile.get("photo") and os.path.exists(profile["photo"]):
@@ -563,6 +562,17 @@ class BackupManager:
                 if photo and os.path.exists(photo):
                     zf.write(photo, f"pin_photos/{os.path.basename(photo)}")
 
+        return buffer.getvalue(), profile["name"]
+
+    def export_profile(self, profile_id):
+        """アプリ専用の外部保存領域にZIPを保存する(フォールバック用)"""
+        zip_bytes, name = self.build_zip_bytes(profile_id)
+        safe_name = "".join(c for c in name if c.isalnum()) or "profile"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest_dir = self.get_export_dir()
+        dest_path = os.path.join(dest_dir, f"{safe_name}_{timestamp}.biketracker.zip")
+        with open(dest_path, "wb") as f:
+            f.write(zip_bytes)
         return dest_path
 
     def import_profile(self, zip_path):
@@ -741,13 +751,75 @@ class ProfileListScreen(Screen):
         app = App.get_running_app()
         self.status_label.text = app.tr("exporting")
 
-        def _do_export(dt):
+        try:
+            zip_bytes, name = app.backup_manager.build_zip_bytes(profile["id"])
+        except Exception as e:
+            print(f"[DEBUG] バックアップの作成に失敗: {e}")
+            self.status_label.text = app.tr("backup_failed", error=e)
+            return
+
+        safe_name = "".join(c for c in name if c.isalnum()) or "profile"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_name}_{timestamp}.biketracker.zip"
+
+        try:
+            from jnius import autoclass
+            from android import activity
+
+            Intent = autoclass("android.content.Intent")
+            JString = autoclass("java.lang.String")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            mactivity = PythonActivity.mActivity
+
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("application/zip")
+            intent.putExtra(Intent.EXTRA_TITLE, JString(filename))
+
+            request_code = 9001
+
+            def on_result(request_code_recv, result_code, data):
+                if request_code_recv != request_code:
+                    return
+                activity.unbind(on_activity_result=on_result)
+                Activity = autoclass("android.app.Activity")
+                if result_code != Activity.RESULT_OK or data is None:
+                    Clock.schedule_once(
+                        lambda dt: setattr(self.status_label, "text", "")
+                    )
+                    return
+                try:
+                    uri = data.getData()
+                    resolver = mactivity.getContentResolver()
+                    out_stream = resolver.openOutputStream(uri)
+                    out_stream.write(zip_bytes)
+                    out_stream.close()
+                    display_path = uri.toString()
+                    Clock.schedule_once(
+                        lambda dt: setattr(
+                            self.status_label,
+                            "text",
+                            app.tr("backup_success", path=display_path),
+                        )
+                    )
+                except Exception as e:
+                    print(f"[DEBUG] 保存先への書き込みに失敗: {e}")
+                    Clock.schedule_once(
+                        lambda dt: setattr(
+                            self.status_label, "text", app.tr("backup_failed", error=e)
+                        )
+                    )
+
+            activity.bind(on_activity_result=on_result)
+            mactivity.startActivityForResult(intent, request_code)
+        except Exception as e:
+            print(f"[DEBUG] 保存先選択ダイアログの表示に失敗: {e}")
+            # SAFが使えない環境向けのフォールバック: アプリ専用領域に保存する
             try:
                 path = app.backup_manager.export_profile(profile["id"])
                 self.status_label.text = app.tr("backup_success", path=path)
-            except Exception as e:
-                print(f"[DEBUG] バックアップに失敗: {e}")
-                self.status_label.text = app.tr("backup_failed", error=e)
+            except Exception as e2:
+                self.status_label.text = app.tr("backup_failed", error=e2)
 
         Clock.schedule_once(_do_export, 0.1)
 
