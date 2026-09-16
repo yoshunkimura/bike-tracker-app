@@ -744,13 +744,28 @@ class ProfileListScreen(Screen):
                     print(f"[DEBUG] インポート用に選択されたURI: {uri.toString()}")
                     resolver = mactivity.getContentResolver()
 
-                    # openFileDescriptorはGoogleドライブ等のクラウドストレージで
-                    # 正しく機能しないことがあるため、ストリーム読み込みを使う
+                    # 永続的な読み取り権限を明示的に取得しておく(クラウドプロバイダ対策)
+                    try:
+                        resolver.takePersistableUriPermission(
+                            uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
+                        print("[DEBUG] 永続読み取り権限の取得に成功")
+                    except Exception as perm_e:
+                        print(f"[DEBUG] 永続読み取り権限の取得に失敗(続行): {perm_e}")
+
                     ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
                     input_stream = resolver.openInputStream(uri)
+                    print(f"[DEBUG] input_stream: {input_stream}")
+                    try:
+                        available = input_stream.available()
+                        print(f"[DEBUG] available()の結果: {available}")
+                    except Exception as avail_e:
+                        print(f"[DEBUG] available()呼び出しに失敗: {avail_e}")
+
                     output_stream = ByteArrayOutputStream()
                     buf = bytearray(8192)
                     n = input_stream.read(buf)
+                    print(f"[DEBUG] 最初のread()の戻り値: {n}")
                     while n != -1:
                         output_stream.write(buf, 0, n)
                         n = input_stream.read(buf)
