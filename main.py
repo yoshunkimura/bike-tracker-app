@@ -2525,7 +2525,7 @@ class MapScreen(Screen):
         MediaFormat = autoclass("android.media.MediaFormat")
         MediaCodec = autoclass("android.media.MediaCodec")
         MediaMuxer = autoclass("android.media.MediaMuxer")
-        MediaCodecInfo = autoclass("android.media.MediaCodecInfo")
+        CodecCapabilities = autoclass("android.media.MediaCodecInfo$CodecCapabilities")
         from android.runnable import run_on_ui_thread
 
         size_result = {}
@@ -2554,7 +2554,7 @@ class MapScreen(Screen):
         fmt = MediaFormat.createVideoFormat(mime, width, height)
         fmt.setInteger(
             MediaFormat.KEY_COLOR_FORMAT,
-            MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
+            CodecCapabilities.COLOR_FormatSurface,
         )
         fmt.setInteger(MediaFormat.KEY_BIT_RATE, 4000000)
         fmt.setInteger(MediaFormat.KEY_FRAME_RATE, self._video_fps)
