@@ -2525,6 +2525,7 @@ class MapScreen(Screen):
         MediaFormat = autoclass("android.media.MediaFormat")
         MediaCodec = autoclass("android.media.MediaCodec")
         MediaMuxer = autoclass("android.media.MediaMuxer")
+        MuxerOutputFormat = autoclass("android.media.MediaMuxer$OutputFormat")
         CodecCapabilities = autoclass("android.media.MediaCodecInfo$CodecCapabilities")
         from android.runnable import run_on_ui_thread
 
@@ -2566,7 +2567,7 @@ class MapScreen(Screen):
         codec.start()
 
         muxer = MediaMuxer(
-            self._video_temp_path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+            self._video_temp_path, MuxerOutputFormat.MUXER_OUTPUT_MPEG_4
         )
 
         self._video_codec = codec
