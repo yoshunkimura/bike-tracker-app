@@ -1910,8 +1910,8 @@ class MapScreen(Screen):
     var basestepMs = 3000; // 実際の記録間隔の目安(約3秒)
 
     var bikeIcon = L.divIcon({{
-      html: '<div style="font-size:40px; line-height:40px;">🏍️</div>',
-      className: '', iconSize: [40, 40], iconAnchor: [20, 20]
+      html: '<div style="font-size:34px; line-height:34px;">🏍️</div>',
+      className: '', iconSize: [34, 34], iconAnchor: [17, 17]
     }});
 
     function nearestPinWithin(lat, lon, meters) {{
