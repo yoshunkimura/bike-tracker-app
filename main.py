@@ -2416,6 +2416,9 @@ class MapScreen(Screen):
 
             AlertDialogBuilder = autoclass("android.app.AlertDialog$Builder")
             JString = autoclass("java.lang.String")
+            ArrayAdapter = autoclass("android.widget.ArrayAdapter")
+            ArrayList = autoclass("java.util.ArrayList")
+            RLayout = autoclass("android.R$layout")
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             activity = PythonActivity.mActivity
 
@@ -2443,9 +2446,14 @@ class MapScreen(Screen):
 
             @run_on_ui_thread
             def _show():
+                items = ArrayList()
+                for label in labels:
+                    items.add(JString(label))
+                adapter = ArrayAdapter(activity, RLayout.simple_list_item_1, items)
+
                 builder = AlertDialogBuilder(activity)
                 builder.setTitle(JString(app.tr("video_speed_dialog_title")))
-                builder.setItems(labels, listener)
+                builder.setAdapter(adapter, listener)
                 builder.show()
 
             _show()
