@@ -62,7 +62,15 @@ jobs:
           # 壊れたZIPのままbuildozerに渡して分かりにくいエラーになるのを防ぐ
           unzip -t "$NDK_ZIP" >/dev/null
 
+          # yes(ライセンス確認への自動同意)がbuildozer終了時にBroken pipeで
+          # 終了すると、pipefailの影響で成功していてもビルド失敗扱いになるため、
+          # buildozer自体の終了コードだけを見るようにする
+          set +e
           yes | buildozer android debug
+          buildozer_status=${PIPESTATUS[1]}
+          set -e
+
+          exit "$buildozer_status"
 
       - name: ビルド結果(APK)をアップロード
         uses: actions/upload-artifact@v4
