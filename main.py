@@ -201,6 +201,13 @@ TRANSLATIONS = {
         "map_add_pin_button": "+ ピン",
         "map_pin_getting_location": "地図の中心位置を取得中...",
         "map_confirm_pin_button": "ここに追加",
+        "save_video_button": "🎥",
+        "video_speed_dialog_title": "動画の再生速度を選択",
+        "video_capturing": "動画を作成中... {progress}%",
+        "video_capture_done": "動画の書き出しが完了しました。保存先を選択してください",
+        "video_save_success": "動画を保存しました:\n{path}",
+        "video_save_failed": "動画の保存に失敗しました: {error}",
+        "video_no_data": "走行記録がないため動画を作成できません",
         "map_pin_drag_hint": "ピンをドラッグして位置を調整し、「ここに追加」をタップしてください",
     },
     "en": {
@@ -282,6 +289,13 @@ TRANSLATIONS = {
         "map_add_pin_button": "+ Pin",
         "map_pin_getting_location": "Getting map center...",
         "map_confirm_pin_button": "Place Here",
+        "save_video_button": "🎥",
+        "video_speed_dialog_title": "Select video playback speed",
+        "video_capturing": "Creating video... {progress}%",
+        "video_capture_done": "Video encoding complete. Please choose where to save it",
+        "video_save_success": "Video saved to:\n{path}",
+        "video_save_failed": "Failed to save video: {error}",
+        "video_no_data": "No route data available to create a video",
         "map_pin_drag_hint": "Drag the pin to adjust its position, then tap \"Place Here\"",
     },
 }
@@ -1693,6 +1707,7 @@ class MapScreen(Screen):
         self.webview = None
         self.back_button_native = None
         self.pin_button_native = None
+        self.video_button_native = None
         self.pin_mode = False
         self.build_ui()
         self.show_map()
@@ -1771,6 +1786,10 @@ class MapScreen(Screen):
                 )
                 prev = (lat, lon)
         playback_js = json.dumps(playback_points, ensure_ascii=False)
+
+        # 動画キャプチャ機能でPython側からも使うため保持しておく
+        self._video_playback_points = playback_points
+        self._video_pins = pins_data
 
         return f"""
 <!DOCTYPE html>
@@ -1994,6 +2013,45 @@ class MapScreen(Screen):
       if (playbackMarker) {{ map.removeLayer(playbackMarker); playbackMarker = null; }}
     }}
 
+    // ---------------- 動画キャプチャ用(コマ撮り、アニメーションなし) ----------------
+    window.setPlaybackFrame = function(index, closeupPinIndex) {{
+      if (index < 0 || index >= playbackPoints.length) return;
+      var p = playbackPoints[index];
+      var latlng = [p.lat, p.lon];
+      if (!playbackMarker) {{
+        playbackMarker = L.marker(latlng, {{icon: bikeIcon}}).addTo(map);
+      }} else {{
+        playbackMarker.setLatLng(latlng);
+      }}
+      map.setView(latlng, map.getZoom(), {{animate: false}});
+      document.getElementById('playback-info').style.display = 'block';
+      document.getElementById('playback-time').textContent = p.time;
+      document.getElementById('playback-distance').textContent = p.distance_km.toFixed(1) + ' km';
+
+      var closeup = document.getElementById('pin-closeup');
+      if (closeupPinIndex >= 0 && closeupPinIndex < pins.length) {{
+        var pin = pins[closeupPinIndex];
+        var img = document.getElementById('pin-closeup-img');
+        var text = document.getElementById('pin-closeup-text');
+        if (pin.photo && pin.photo !== 'TOO_LARGE') {{
+          img.src = pin.photo;
+          img.style.display = 'block';
+        }} else {{
+          img.style.display = 'none';
+        }}
+        text.textContent = pin.text || '';
+        closeup.style.display = 'flex';
+      }} else {{
+        closeup.style.display = 'none';
+      }}
+    }};
+
+    window.clearPlaybackFrame = function() {{
+      if (playbackMarker) {{ map.removeLayer(playbackMarker); playbackMarker = null; }}
+      document.getElementById('playback-info').style.display = 'none';
+      document.getElementById('pin-closeup').style.display = 'none';
+    }};
+
     // 再生コントロールのボタンを組み立てる
     var controls = document.getElementById('playback-controls');
     if (playbackPoints.length > 0) {{
@@ -2168,6 +2226,30 @@ class MapScreen(Screen):
                 self.pin_button_native = pin_button
                 self._map_center_callback_class = MapCenterCallback
 
+                # 地図の右端(縦中央)に配置する「動画として保存」ボタン
+                video_button = AndroidButton(activity)
+                video_button.setText(JString(app.tr("save_video_button")))
+                video_button.setTextColor(Color.WHITE)
+                video_button.setBackgroundColor(Color.parseColor("#CC2E7D32"))
+                video_button.setAllCaps(False)
+                video_button.setClickable(True)
+                video_button.setFocusable(True)
+                video_button.setElevation(dp(8))
+                video_button.setTextSize(11)
+                video_button.setPadding(dp(4), dp(4), dp(4), dp(4))
+
+                self._video_click_listener = OnClickListener(
+                    lambda: Clock.schedule_once(lambda dt: self._show_video_speed_dialog())
+                )
+                video_button.setOnClickListener(self._video_click_listener)
+
+                video_params = FrameLayoutParams(dp(64), dp(64))
+                video_params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL
+                video_params.setMargins(0, 0, dp(8), 0)
+                activity.addContentView(video_button, video_params)
+                video_button.bringToFront()
+                self.video_button_native = video_button
+
             _create_webview()
         except Exception as e:
             print(f"[DEBUG] WebView表示に失敗: {e}")
@@ -2256,11 +2338,459 @@ class MapScreen(Screen):
 
         Clock.schedule_once(_cleanup_and_go)
 
+    # ---------------------------------------------------------------
+    # 動画として保存する機能
+    # ---------------------------------------------------------------
+    def _set_banner_text(self, text):
+        """WebView内のバナー表示を書き換える(進捗表示に使う)"""
+        if self.webview is None:
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            escaped = json.dumps(text)
+            js = f"document.getElementById('banner').innerText = {escaped};"
+
+            @run_on_ui_thread
+            def _apply():
+                self.webview.evaluateJavascript(JString(js), None)
+
+            _apply()
+        except Exception as e:
+            print(f"[DEBUG] バナー表示の更新に失敗: {e}")
+
+    def _set_map_controls_visible(self, visible):
+        """ネイティブボタンと再生コントロールの表示・非表示を切り替える"""
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            View = autoclass("android.view.View")
+            visibility = View.VISIBLE if visible else View.GONE
+
+            @run_on_ui_thread
+            def _apply():
+                for btn in (
+                    self.back_button_native,
+                    self.pin_button_native,
+                    self.video_button_native,
+                ):
+                    if btn is not None:
+                        btn.setVisibility(visibility)
+
+            _apply()
+        except Exception as e:
+            print(f"[DEBUG] ボタン表示切替に失敗: {e}")
+
+        if self.webview is not None:
+            try:
+                from jnius import autoclass
+                from android.runnable import run_on_ui_thread
+
+                JString = autoclass("java.lang.String")
+                display = "flex" if visible else "none"
+                js = f"var c = document.getElementById('playback-controls'); if (c) c.style.display = '{display}';"
+
+                @run_on_ui_thread
+                def _eval():
+                    self.webview.evaluateJavascript(JString(js), None)
+
+                _eval()
+            except Exception as e:
+                print(f"[DEBUG] 再生コントロールの表示切替に失敗: {e}")
+
+    def _show_video_speed_dialog(self):
+        app = App.get_running_app()
+        if getattr(self, "_video_capturing", False):
+            return
+        points = getattr(self, "_video_playback_points", None)
+        if not points:
+            self._set_banner_text(app.tr("video_no_data"))
+            return
+
+        try:
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android.runnable import run_on_ui_thread
+
+            AlertDialogBuilder = autoclass("android.app.AlertDialog$Builder")
+            JString = autoclass("java.lang.String")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+
+            speeds = [1, 6, 20, 40, 100]
+            labels = [f"{s}x" for s in speeds]
+
+            class DialogClickListener(PythonJavaClass):
+                __javainterfaces__ = ["android/content/DialogInterface$OnClickListener"]
+                __javacontext__ = "app"
+
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+
+                @java_method("(Landroid/content/DialogInterface;I)V")
+                def onClick(self, dialog, which):
+                    self.callback(which)
+
+            def on_choice(which):
+                speed = speeds[which]
+                Clock.schedule_once(lambda dt: self._start_video_capture(speed))
+
+            listener = DialogClickListener(on_choice)
+            self._video_dialog_listener = listener  # ガベージコレクション対策で参照を保持
+
+            @run_on_ui_thread
+            def _show():
+                builder = AlertDialogBuilder(activity)
+                builder.setTitle(JString(app.tr("video_speed_dialog_title")))
+                builder.setItems(labels, listener)
+                builder.show()
+
+            _show()
+        except Exception as e:
+            print(f"[DEBUG] 速度選択ダイアログの表示に失敗: {e}")
+            self._set_banner_text(app.tr("video_save_failed", error=e))
+
+    def _start_video_capture(self, speed):
+        app = App.get_running_app()
+        if getattr(self, "_video_capturing", False):
+            return
+        points = getattr(self, "_video_playback_points", None) or []
+        pins = getattr(self, "_video_pins", None) or []
+        if not points:
+            return
+
+        self._video_capturing = True
+        fps = 10
+        basestep_ms = 3000  # 実際の記録間隔の目安(再生機能と同じ値)
+        total_real_ms = len(points) * basestep_ms
+        total_video_ms = total_real_ms / speed
+        total_frames = max(1, int(round(total_video_ms / 1000 * fps)))
+        # 動画が長くなりすぎて実用的でなくなるのを防ぐための上限(約10分)
+        total_frames = min(total_frames, fps * 600)
+
+        frame_plan = []
+        shown_pin_indices = set()
+        for frame_i in range(total_frames):
+            video_t_ms = frame_i / fps * 1000
+            real_t_ms = video_t_ms * speed
+            point_index = min(len(points) - 1, int(real_t_ms / basestep_ms))
+            frame_plan.append((point_index, -1))
+
+            p = points[point_index]
+            for pin_idx, pin in enumerate(pins):
+                if pin_idx in shown_pin_indices:
+                    continue
+                dist_km = haversine_km(p["lat"], p["lon"], pin["lat"], pin["lon"])
+                if dist_km * 1000 <= 30:
+                    shown_pin_indices.add(pin_idx)
+                    closeup_frames = max(1, int(round(2 * fps)))
+                    for _ in range(closeup_frames):
+                        frame_plan.append((point_index, pin_idx))
+                    break
+
+        self._video_frame_plan = frame_plan
+        self._video_frame_index = 0
+        self._video_fps = fps
+        self._video_temp_path = os.path.join(app.user_data_dir, "temp_export_video.mp4")
+
+        self._set_map_controls_visible(False)
+        self._set_banner_text(app.tr("video_capturing", progress=0))
+
+        try:
+            self._init_video_encoder()
+        except Exception as e:
+            print(f"[DEBUG] 動画エンコーダの初期化に失敗: {e}")
+            self._video_capturing = False
+            self._set_map_controls_visible(True)
+            self._set_banner_text(app.tr("video_save_failed", error=e))
+            return
+
+        Clock.schedule_once(lambda dt: self._capture_next_frame(), 0.3)
+
+    def _init_video_encoder(self):
+        from jnius import autoclass
+        import threading
+
+        MediaFormat = autoclass("android.media.MediaFormat")
+        MediaCodec = autoclass("android.media.MediaCodec")
+        MediaMuxer = autoclass("android.media.MediaMuxer")
+        MediaCodecInfo = autoclass("android.media.MediaCodecInfo")
+        from android.runnable import run_on_ui_thread
+
+        size_result = {}
+        done_event = threading.Event()
+
+        @run_on_ui_thread
+        def _get_size():
+            size_result["width"] = self.webview.getWidth()
+            size_result["height"] = self.webview.getHeight()
+            done_event.set()
+
+        _get_size()
+        done_event.wait(timeout=5.0)
+
+        width = size_result.get("width", 0) or 0
+        height = size_result.get("height", 0) or 0
+        width -= width % 2
+        height -= height % 2
+        if width <= 0 or height <= 0:
+            raise ValueError("WebViewの表示サイズを取得できませんでした")
+
+        self._video_width = width
+        self._video_height = height
+
+        mime = "video/avc"
+        fmt = MediaFormat.createVideoFormat(mime, width, height)
+        fmt.setInteger(
+            MediaFormat.KEY_COLOR_FORMAT,
+            MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
+        )
+        fmt.setInteger(MediaFormat.KEY_BIT_RATE, 4000000)
+        fmt.setInteger(MediaFormat.KEY_FRAME_RATE, self._video_fps)
+        fmt.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
+
+        codec = MediaCodec.createEncoderByType(mime)
+        codec.configure(fmt, None, None, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        input_surface = codec.createInputSurface()
+        codec.start()
+
+        muxer = MediaMuxer(
+            self._video_temp_path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+        )
+
+        self._video_codec = codec
+        self._video_input_surface = input_surface
+        self._video_muxer = muxer
+        self._video_muxer_started = False
+        self._video_track_index = -1
+
+    def _capture_next_frame(self):
+        if self._video_frame_index >= len(self._video_frame_plan):
+            self._finish_video_capture()
+            return
+
+        point_index, closeup_pin_index = self._video_frame_plan[self._video_frame_index]
+
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            js = f"setPlaybackFrame({point_index}, {closeup_pin_index});"
+
+            @run_on_ui_thread
+            def _set_frame():
+                self.webview.evaluateJavascript(JString(js), None)
+
+            _set_frame()
+        except Exception as e:
+            print(f"[DEBUG] フレーム設定に失敗: {e}")
+
+        # WebViewの再描画が反映されるのを少し待ってからキャプチャする
+        Clock.schedule_once(lambda dt: self._capture_and_encode_frame(), 0.08)
+
+    def _capture_and_encode_frame(self):
+        app = App.get_running_app()
+        try:
+            self._draw_frame_to_encoder()
+            self._drain_encoder(end_of_stream=False)
+        except Exception as e:
+            print(f"[DEBUG] フレームの描画・エンコードに失敗: {e}")
+            self._abort_video_capture(str(e))
+            return
+
+        self._video_frame_index += 1
+        progress = int(self._video_frame_index / len(self._video_frame_plan) * 100)
+        self._set_banner_text(app.tr("video_capturing", progress=progress))
+
+        Clock.schedule_once(lambda dt: self._capture_next_frame(), 0)
+
+    def _draw_frame_to_encoder(self):
+        from jnius import autoclass
+        from android.runnable import run_on_ui_thread
+        import threading
+
+        Bitmap = autoclass("android.graphics.Bitmap")
+        BitmapConfig = autoclass("android.graphics.Bitmap$Config")
+        AndroidCanvas = autoclass("android.graphics.Canvas")
+
+        done_event = threading.Event()
+        result = {}
+
+        @run_on_ui_thread
+        def _draw():
+            try:
+                bitmap = Bitmap.createBitmap(
+                    self._video_width, self._video_height, BitmapConfig.ARGB_8888
+                )
+                canvas = AndroidCanvas(bitmap)
+                self.webview.draw(canvas)
+
+                surface_canvas = self._video_input_surface.lockCanvas(None)
+                surface_canvas.drawBitmap(bitmap, 0, 0, None)
+                self._video_input_surface.unlockCanvasAndPost(surface_canvas)
+                bitmap.recycle()
+            except Exception as e:
+                result["error"] = str(e)
+            finally:
+                done_event.set()
+
+        _draw()
+        if not done_event.wait(timeout=5.0):
+            raise RuntimeError("フレーム描画がタイムアウトしました")
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+
+    def _drain_encoder(self, end_of_stream):
+        from jnius import autoclass
+
+        MediaCodec = autoclass("android.media.MediaCodec")
+        BufferInfo = autoclass("android.media.MediaCodec$BufferInfo")
+
+        codec = self._video_codec
+        muxer = self._video_muxer
+
+        if end_of_stream:
+            codec.signalEndOfInputStream()
+
+        timeout_us = 10000
+        buffer_info = BufferInfo()
+
+        while True:
+            output_index = codec.dequeueOutputBuffer(buffer_info, timeout_us)
+            if output_index == MediaCodec.INFO_TRY_AGAIN_LATER:
+                if not end_of_stream:
+                    break
+                else:
+                    continue
+            elif output_index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
+                if self._video_muxer_started:
+                    raise RuntimeError("動画フォーマットが2回変化しました")
+                new_format = codec.getOutputFormat()
+                self._video_track_index = muxer.addTrack(new_format)
+                muxer.start()
+                self._video_muxer_started = True
+            elif output_index >= 0:
+                encoded_data = codec.getOutputBuffer(output_index)
+                if buffer_info.size > 0 and self._video_muxer_started:
+                    encoded_data.position(buffer_info.offset)
+                    encoded_data.limit(buffer_info.offset + buffer_info.size)
+                    muxer.writeSampleData(self._video_track_index, encoded_data, buffer_info)
+                codec.releaseOutputBuffer(output_index, False)
+                if (buffer_info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0:
+                    break
+
+    def _finish_video_capture(self):
+        app = App.get_running_app()
+        try:
+            self._drain_encoder(end_of_stream=True)
+            self._video_codec.stop()
+            self._video_codec.release()
+            self._video_muxer.stop()
+            self._video_muxer.release()
+        except Exception as e:
+            print(f"[DEBUG] 動画エンコーダの終了処理に失敗: {e}")
+            self._abort_video_capture(str(e))
+            return
+
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+
+            @run_on_ui_thread
+            def _clear():
+                self.webview.evaluateJavascript(JString("clearPlaybackFrame();"), None)
+
+            _clear()
+        except Exception as e:
+            print(f"[DEBUG] フレームのクリアに失敗: {e}")
+
+        self._set_map_controls_visible(True)
+        self._video_capturing = False
+        self._set_banner_text(app.tr("video_capture_done"))
+        self._save_video_via_saf()
+
+    def _abort_video_capture(self, error_message):
+        app = App.get_running_app()
+        try:
+            if getattr(self, "_video_codec", None) is not None:
+                self._video_codec.stop()
+                self._video_codec.release()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_video_muxer", None) is not None:
+                if getattr(self, "_video_muxer_started", False):
+                    self._video_muxer.stop()
+                self._video_muxer.release()
+        except Exception:
+            pass
+        self._set_map_controls_visible(True)
+        self._video_capturing = False
+        self._set_banner_text(app.tr("video_save_failed", error=error_message))
+
+    def _save_video_via_saf(self):
+        app = App.get_running_app()
+        try:
+            from jnius import autoclass
+            from android import activity
+
+            Intent = autoclass("android.content.Intent")
+            JString = autoclass("java.lang.String")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            mactivity = PythonActivity.mActivity
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"route_video_{timestamp}.mp4"
+
+            intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.setType("video/mp4")
+            intent.putExtra(Intent.EXTRA_TITLE, JString(filename))
+
+            request_code = 9003
+
+            def on_result(request_code_recv, result_code, data):
+                if request_code_recv != request_code:
+                    return
+                activity.unbind(on_activity_result=on_result)
+                Activity = autoclass("android.app.Activity")
+                if result_code != Activity.RESULT_OK or data is None:
+                    return
+                try:
+                    uri = data.getData()
+                    resolver = mactivity.getContentResolver()
+                    out_stream = resolver.openOutputStream(uri)
+                    with open(self._video_temp_path, "rb") as f:
+                        video_bytes = f.read()
+                    out_stream.write(video_bytes, 0, len(video_bytes))
+                    out_stream.flush()
+                    out_stream.close()
+                    display_path = uri.toString()
+                    message = app.tr("video_save_success", path=display_path)
+                    Clock.schedule_once(lambda dt: self._set_banner_text(message))
+                except Exception as e:
+                    print(f"[DEBUG] 動画の保存に失敗: {e}")
+                    message = app.tr("video_save_failed", error=e)
+                    Clock.schedule_once(lambda dt: self._set_banner_text(message))
+
+            activity.bind(on_activity_result=on_result)
+            mactivity.startActivityForResult(intent, request_code)
+        except Exception as e:
+            print(f"[DEBUG] 保存先選択ダイアログの表示に失敗: {e}")
+            self._set_banner_text(app.tr("video_save_failed", error=e))
+
     def _remove_webview(self):
         views_to_remove = [
             getattr(self, "webview", None),
             getattr(self, "back_button_native", None),
             getattr(self, "pin_button_native", None),
+            getattr(self, "video_button_native", None),
         ]
         if any(v is not None for v in views_to_remove):
             try:
@@ -2283,6 +2813,7 @@ class MapScreen(Screen):
             self.webview = None
             self.back_button_native = None
             self.pin_button_native = None
+            self.video_button_native = None
 
     def go_back(self, instance):
         self.manager.current = "route_list"
