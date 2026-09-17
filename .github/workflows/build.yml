@@ -39,8 +39,29 @@ jobs:
           pip3 install --user buildozer cython==0.29.36
 
       - name: APKをビルド
+        shell: bash
         run: |
-          export PATH=$PATH:$HOME/.local/bin
+          set -euo pipefail
+
+          export PATH="$PATH:$HOME/.local/bin"
+
+          NDK_DIR="$HOME/.buildozer/android/platform"
+          NDK_ZIP="$NDK_DIR/android-ndk-r25b-linux.zip"
+
+          mkdir -p "$NDK_DIR"
+
+          # 前回の失敗で残った可能性のある、不完全なファイルを削除しておく
+          rm -rf "$NDK_DIR/android-ndk-r25b"
+          rm -f "$NDK_ZIP"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            --retry-delay 5 \
+            --output "$NDK_ZIP" \
+            "https://dl.google.com/android/repository/android-ndk-r25b-linux.zip"
+
+          # 壊れたZIPのままbuildozerに渡して分かりにくいエラーになるのを防ぐ
+          unzip -t "$NDK_ZIP" >/dev/null
+
           yes | buildozer android debug
 
       - name: ビルド結果(APK)をアップロード
