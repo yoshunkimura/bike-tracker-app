@@ -1805,11 +1805,12 @@ class MapScreen(Screen):
     #playback-controls {{
       position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
       z-index: 1000; background: rgba(0,0,0,0.7); border-radius: 8px;
-      padding: 8px; display: flex; gap: 6px; align-items: center;
+      padding: 6px; display: flex; gap: 4px; align-items: center;
+      max-width: 94vw; overflow-x: auto;
     }}
     #playback-controls button {{
       background: #1976D2; color: white; border: none; border-radius: 4px;
-      padding: 8px 12px; font-size: 14px;
+      padding: 7px 9px; font-size: 13px; flex-shrink: 0;
     }}
     #playback-controls button.active {{ background: #F57C00; }}
     #pin-closeup {{
@@ -1909,7 +1910,8 @@ class MapScreen(Screen):
     var basestepMs = 3000; // 実際の記録間隔の目安(約3秒)
 
     var bikeIcon = L.divIcon({{
-      html: '🏍️', className: '', iconSize: [28, 28], iconAnchor: [14, 14]
+      html: '<div style="font-size:56px; line-height:56px;">🏍️</div>',
+      className: '', iconSize: [56, 56], iconAnchor: [28, 28]
     }});
 
     function nearestPinWithin(lat, lon, meters) {{
@@ -2005,7 +2007,7 @@ class MapScreen(Screen):
       stopBtn.onclick = function() {{ stopPlayback(); }};
       controls.appendChild(stopBtn);
 
-      [1, 6, 20, 40].forEach(function(speed) {{
+      [1, 6, 20, 40, 100].forEach(function(speed) {{
         var btn = document.createElement('button');
         btn.textContent = speed + 'x';
         if (speed === playbackSpeed) btn.classList.add('active');
