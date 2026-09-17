@@ -208,6 +208,7 @@ TRANSLATIONS = {
         "video_save_success": "動画を保存しました:\n{path}",
         "video_save_failed": "動画の保存に失敗しました: {error}",
         "video_no_data": "走行記録がないため動画を作成できません",
+        "video_cancelled": "動画の作成をキャンセルしました",
         "map_pin_drag_hint": "ピンをドラッグして位置を調整し、「ここに追加」をタップしてください",
     },
     "en": {
@@ -296,6 +297,7 @@ TRANSLATIONS = {
         "video_save_success": "Video saved to:\n{path}",
         "video_save_failed": "Failed to save video: {error}",
         "video_no_data": "No route data available to create a video",
+        "video_cancelled": "Video creation cancelled",
         "map_pin_drag_hint": "Drag the pin to adjust its position, then tap \"Place Here\"",
     },
 }
@@ -1059,55 +1061,56 @@ class ProfileListScreen(Screen):
 
     def _build_profile_card(self, profile):
         app = App.get_running_app()
-        card = BoxLayout(orientation="vertical", size_hint_y=None, height=270)
+        card = BoxLayout(orientation="vertical", size_hint_y=None, height=230)
 
         if profile.get("photo") and os.path.exists(profile["photo"]):
             img = LongPressImage(
                 source=profile["photo"],
-                size_hint=(1, 0.52),
+                size_hint=(1, 0.65),
                 on_long_press=lambda p=profile: self._confirm_delete_profile(p),
             )
         else:
             img = LongPressLabel(
                 text=app.tr("no_photo"),
                 font_name="NotoSansJP",
-                size_hint=(1, 0.52),
+                size_hint=(1, 0.65),
                 on_long_press=lambda p=profile: self._confirm_delete_profile(p),
             )
         card.add_widget(img)
 
+        button_row = BoxLayout(orientation="horizontal", size_hint=(1, 0.35), spacing=2)
+
         name_button = Button(
             text=profile["name"],
             font_name="NotoSansJP",
-            font_size="16sp",
-            size_hint=(1, 0.18),
+            font_size="13sp",
         )
         name_button.bind(
             on_press=lambda instance, p=profile: self.go_to_tracker(p)
         )
-        card.add_widget(name_button)
+        button_row.add_widget(name_button)
 
         map_button = Button(
             text=app.tr("map_button"),
             font_name="NotoSansJP",
-            font_size="14sp",
-            size_hint=(1, 0.15),
+            font_size="12sp",
         )
         map_button.bind(
             on_press=lambda instance, p=profile: self.go_to_route_list(p)
         )
-        card.add_widget(map_button)
+        button_row.add_widget(map_button)
 
         backup_button = Button(
             text=app.tr("backup_button"),
             font_name="NotoSansJP",
-            font_size="13sp",
-            size_hint=(1, 0.15),
+            font_size="11sp",
         )
         backup_button.bind(
             on_press=lambda instance, p=profile: self.export_profile(p)
         )
-        card.add_widget(backup_button)
+        button_row.add_widget(backup_button)
+
+        card.add_widget(button_row)
 
         return card
 
@@ -1708,6 +1711,8 @@ class MapScreen(Screen):
         self.back_button_native = None
         self.pin_button_native = None
         self.video_button_native = None
+        self.video_progress_native = None
+        self.video_cancel_button_native = None
         self.pin_mode = False
         self.build_ui()
         self.show_map()
@@ -2014,8 +2019,11 @@ class MapScreen(Screen):
     }}
 
     // ---------------- 動画キャプチャ用(コマ撮り、アニメーションなし) ----------------
+    window.frameReady = true;
+
     window.setPlaybackFrame = function(index, closeupPinIndex) {{
       if (index < 0 || index >= playbackPoints.length) return;
+      window.frameReady = false;
       var p = playbackPoints[index];
       var latlng = [p.lat, p.lon];
       if (!playbackMarker) {{
@@ -2044,12 +2052,21 @@ class MapScreen(Screen):
       }} else {{
         closeup.style.display = 'none';
       }}
+
+      // 地図の再投影・再描画が完了してから撮影できるよう、
+      // 二重のrequestAnimationFrameで1回分の描画サイクルを待つ
+      requestAnimationFrame(function() {{
+        requestAnimationFrame(function() {{
+          window.frameReady = true;
+        }});
+      }});
     }};
 
     window.clearPlaybackFrame = function() {{
       if (playbackMarker) {{ map.removeLayer(playbackMarker); playbackMarker = null; }}
       document.getElementById('playback-info').style.display = 'none';
       document.getElementById('pin-closeup').style.display = 'none';
+      window.frameReady = true;
     }};
 
     // 再生コントロールのボタンを組み立てる
@@ -2401,6 +2418,132 @@ class MapScreen(Screen):
             except Exception as e:
                 print(f"[DEBUG] 再生コントロールの表示切替に失敗: {e}")
 
+    def _show_video_progress_ui(self):
+        """動画撮影の進捗表示とキャンセルボタンをネイティブビューとして表示する
+        (WebViewの外側に重ねるので、撮影される映像には映り込まない)"""
+        app = App.get_running_app()
+        try:
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android.runnable import run_on_ui_thread
+
+            AndroidButton = autoclass("android.widget.Button")
+            TextView = autoclass("android.widget.TextView")
+            FrameLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+            Gravity = autoclass("android.view.Gravity")
+            Color = autoclass("android.graphics.Color")
+            JString = autoclass("java.lang.String")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+
+            class OnClickListener(PythonJavaClass):
+                __javainterfaces__ = ["android/view/View$OnClickListener"]
+                __javacontext__ = "app"
+
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+
+                @java_method("(Landroid/view/View;)V")
+                def onClick(self, view):
+                    self.callback()
+
+            density = activity.getResources().getDisplayMetrics().density
+
+            def dp(v):
+                return int(v * density)
+
+            @run_on_ui_thread
+            def _create():
+                progress_label = TextView(activity)
+                progress_label.setText(JString(app.tr("video_capturing", progress=0)))
+                progress_label.setTextColor(Color.WHITE)
+                progress_label.setBackgroundColor(Color.parseColor("#CC000000"))
+                progress_label.setPadding(dp(16), dp(10), dp(16), dp(10))
+                progress_label.setTextSize(14)
+
+                progress_params = FrameLayoutParams(
+                    FrameLayoutParams.WRAP_CONTENT, FrameLayoutParams.WRAP_CONTENT
+                )
+                progress_params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                progress_params.setMargins(0, dp(80), 0, 0)
+                activity.addContentView(progress_label, progress_params)
+                progress_label.bringToFront()
+                self.video_progress_native = progress_label
+
+                cancel_button = AndroidButton(activity)
+                cancel_button.setText(JString(app.tr("cancel_button")))
+                cancel_button.setTextColor(Color.WHITE)
+                cancel_button.setBackgroundColor(Color.parseColor("#CCB71C1C"))
+                cancel_button.setAllCaps(False)
+                cancel_button.setClickable(True)
+                cancel_button.setFocusable(True)
+                cancel_button.setElevation(dp(8))
+
+                self._video_cancel_click_listener = OnClickListener(
+                    lambda: Clock.schedule_once(lambda dt: self._request_cancel_video_capture())
+                )
+                cancel_button.setOnClickListener(self._video_cancel_click_listener)
+
+                cancel_params = FrameLayoutParams(dp(120), dp(48))
+                cancel_params.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL
+                cancel_params.setMargins(0, dp(130), 0, 0)
+                activity.addContentView(cancel_button, cancel_params)
+                cancel_button.bringToFront()
+                self.video_cancel_button_native = cancel_button
+
+            _create()
+        except Exception as e:
+            print(f"[DEBUG] 動画進捗表示の作成に失敗: {e}")
+
+    def _update_video_progress_ui(self, percent):
+        app = App.get_running_app()
+        if getattr(self, "video_progress_native", None) is None:
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            text = app.tr("video_capturing", progress=percent)
+
+            @run_on_ui_thread
+            def _update():
+                if self.video_progress_native is not None:
+                    self.video_progress_native.setText(JString(text))
+
+            _update()
+        except Exception as e:
+            print(f"[DEBUG] 動画進捗表示の更新に失敗: {e}")
+
+    def _hide_video_progress_ui(self):
+        try:
+            from jnius import autoclass, cast
+            from android.runnable import run_on_ui_thread
+
+            ViewGroup = autoclass("android.view.ViewGroup")
+            views = [
+                getattr(self, "video_progress_native", None),
+                getattr(self, "video_cancel_button_native", None),
+            ]
+
+            @run_on_ui_thread
+            def _remove():
+                for v in views:
+                    if v is not None:
+                        parent = v.getParent()
+                        if parent is not None:
+                            cast(ViewGroup, parent).removeView(v)
+
+            _remove()
+        except Exception as e:
+            print(f"[DEBUG] 動画進捗表示の削除に失敗: {e}")
+        self.video_progress_native = None
+        self.video_cancel_button_native = None
+
+    def _request_cancel_video_capture(self):
+        """撮影中にキャンセルボタンが押された"""
+        self._video_cancel_requested = True
+
     def _show_video_speed_dialog(self):
         app = App.get_running_app()
         if getattr(self, "_video_capturing", False):
@@ -2502,10 +2645,11 @@ class MapScreen(Screen):
         self._video_frame_plan = frame_plan
         self._video_frame_index = 0
         self._video_fps = fps
+        self._video_cancel_requested = False
         self._video_temp_path = os.path.join(app.user_data_dir, "temp_export_video.mp4")
 
         self._set_map_controls_visible(False)
-        self._set_banner_text(app.tr("video_capturing", progress=0))
+        self._show_video_progress_ui()
 
         try:
             self._init_video_encoder()
@@ -2513,6 +2657,7 @@ class MapScreen(Screen):
             print(f"[DEBUG] 動画エンコーダの初期化に失敗: {e}")
             self._video_capturing = False
             self._set_map_controls_visible(True)
+            self._hide_video_progress_ui()
             self._set_banner_text(app.tr("video_save_failed", error=e))
             return
 
@@ -2581,6 +2726,10 @@ class MapScreen(Screen):
             self._finish_video_capture()
             return
 
+        if getattr(self, "_video_cancel_requested", False):
+            self._handle_video_cancel()
+            return
+
         point_index, closeup_pin_index = self._video_frame_plan[self._video_frame_index]
 
         try:
@@ -2598,11 +2747,52 @@ class MapScreen(Screen):
         except Exception as e:
             print(f"[DEBUG] フレーム設定に失敗: {e}")
 
-        # WebViewの再描画が反映されるのを少し待ってからキャプチャする
-        Clock.schedule_once(lambda dt: self._capture_and_encode_frame(), 0.08)
+        # 地図の再描画(座標の再投影)が完了したことを確認してからキャプチャする
+        self._wait_for_frame_ready(self._capture_and_encode_frame)
+
+    def _wait_for_frame_ready(self, on_ready, attempts_left=25):
+        if getattr(self, "_video_cancel_requested", False):
+            self._handle_video_cancel()
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            callback_class = getattr(self, "_map_center_callback_class", None)
+            if callback_class is None or attempts_left <= 0 or self.webview is None:
+                # 仕組みが使えない場合や、最大待機に達した場合はそのまま進める
+                Clock.schedule_once(lambda dt: on_ready(), 0.05)
+                return
+
+            def _on_value(value_str):
+                ready = "true" in (value_str or "").lower()
+                if ready:
+                    Clock.schedule_once(lambda dt: on_ready())
+                else:
+                    Clock.schedule_once(
+                        lambda dt: self._wait_for_frame_ready(on_ready, attempts_left - 1),
+                        0.03,
+                    )
+
+            callback = callback_class(_on_value)
+            self._pending_frame_ready_callback = callback  # ガベージコレクション対策
+
+            @run_on_ui_thread
+            def _check():
+                self.webview.evaluateJavascript(
+                    JString("window.frameReady === true"), callback
+                )
+
+            _check()
+        except Exception as e:
+            print(f"[DEBUG] フレーム準備確認に失敗: {e}")
+            Clock.schedule_once(lambda dt: on_ready(), 0.05)
 
     def _capture_and_encode_frame(self):
-        app = App.get_running_app()
+        if getattr(self, "_video_cancel_requested", False):
+            self._handle_video_cancel()
+            return
         try:
             self._draw_frame_to_encoder()
             self._drain_encoder(end_of_stream=False)
@@ -2613,7 +2803,7 @@ class MapScreen(Screen):
 
         self._video_frame_index += 1
         progress = int(self._video_frame_index / len(self._video_frame_plan) * 100)
-        self._set_banner_text(app.tr("video_capturing", progress=progress))
+        self._update_video_progress_ui(progress)
 
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0)
 
@@ -2720,6 +2910,7 @@ class MapScreen(Screen):
             print(f"[DEBUG] フレームのクリアに失敗: {e}")
 
         self._set_map_controls_visible(True)
+        self._hide_video_progress_ui()
         self._video_capturing = False
         self._set_banner_text(app.tr("video_capture_done"))
         self._save_video_via_saf()
@@ -2740,8 +2931,53 @@ class MapScreen(Screen):
         except Exception:
             pass
         self._set_map_controls_visible(True)
+        self._hide_video_progress_ui()
         self._video_capturing = False
         self._set_banner_text(app.tr("video_save_failed", error=error_message))
+
+    def _handle_video_cancel(self):
+        """撮影中にキャンセルボタンが押された場合の後片付け"""
+        app = App.get_running_app()
+        try:
+            if getattr(self, "_video_codec", None) is not None:
+                self._video_codec.stop()
+                self._video_codec.release()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_video_muxer", None) is not None:
+                if getattr(self, "_video_muxer_started", False):
+                    self._video_muxer.stop()
+                self._video_muxer.release()
+        except Exception:
+            pass
+        try:
+            temp_path = getattr(self, "_video_temp_path", None)
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception as e:
+            print(f"[DEBUG] 一時動画ファイルの削除に失敗: {e}")
+
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+
+            @run_on_ui_thread
+            def _clear():
+                if self.webview is not None:
+                    self.webview.evaluateJavascript(JString("clearPlaybackFrame();"), None)
+
+            _clear()
+        except Exception as e:
+            print(f"[DEBUG] フレームのクリアに失敗: {e}")
+
+        self._set_map_controls_visible(True)
+        self._hide_video_progress_ui()
+        self._video_capturing = False
+        self._video_cancel_requested = False
+        self._set_banner_text(app.tr("video_cancelled"))
 
     def _save_video_via_saf(self):
         app = App.get_running_app()
@@ -2800,6 +3036,8 @@ class MapScreen(Screen):
             getattr(self, "back_button_native", None),
             getattr(self, "pin_button_native", None),
             getattr(self, "video_button_native", None),
+            getattr(self, "video_progress_native", None),
+            getattr(self, "video_cancel_button_native", None),
         ]
         if any(v is not None for v in views_to_remove):
             try:
@@ -2823,6 +3061,8 @@ class MapScreen(Screen):
             self.back_button_native = None
             self.pin_button_native = None
             self.video_button_native = None
+            self.video_progress_native = None
+            self.video_cancel_button_native = None
 
     def go_back(self, instance):
         self.manager.current = "route_list"
