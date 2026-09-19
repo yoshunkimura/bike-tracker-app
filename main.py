@@ -2650,6 +2650,9 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(False)
         self._show_video_progress_ui()
+        # Canvas描画のルート線がハードウェア描画では正しくキャプチャされないため、
+        # 撮影中だけWebViewをソフトウェア描画モードに切り替える
+        self._set_webview_layer_type(software=True)
 
         try:
             self._init_video_encoder()
@@ -2658,10 +2661,32 @@ class MapScreen(Screen):
             self._video_capturing = False
             self._set_map_controls_visible(True)
             self._hide_video_progress_ui()
+            self._set_webview_layer_type(software=False)
             self._set_banner_text(app.tr("video_save_failed", error=e))
             return
 
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0.3)
+
+    def _set_webview_layer_type(self, software):
+        """撮影中はWebViewをソフトウェア描画にして、Canvas等の内容も
+        確実にBitmapへキャプチャできるようにする(撮影後は元(ハードウェア)に戻す)"""
+        if self.webview is None:
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            View = autoclass("android.view.View")
+            layer_type = View.LAYER_TYPE_SOFTWARE if software else View.LAYER_TYPE_HARDWARE
+
+            @run_on_ui_thread
+            def _apply():
+                if self.webview is not None:
+                    self.webview.setLayerType(layer_type, None)
+
+            _apply()
+        except Exception as e:
+            print(f"[DEBUG] WebViewの描画モード切替に失敗: {e}")
 
     def _init_video_encoder(self):
         from jnius import autoclass
@@ -2911,6 +2936,7 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_capture_done"))
         self._save_video_via_saf()
@@ -2932,6 +2958,7 @@ class MapScreen(Screen):
             pass
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_save_failed", error=error_message))
 
@@ -2975,6 +3002,7 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._video_cancel_requested = False
         self._set_banner_text(app.tr("video_cancelled"))
