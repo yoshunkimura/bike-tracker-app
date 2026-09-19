@@ -1770,6 +1770,7 @@ class MapScreen(Screen):
             first_seg = next(seg for seg in segments_with_time if seg)
             center_js = str([first_seg[0][1], first_seg[0][2]])
             banner = f"{info_text} - {total_distance_km:.1f} km"
+        banner_js = json.dumps(banner, ensure_ascii=False)
 
         # ピンをJavaScriptオブジェクトの配列として埋め込む(json.dumpsでエスケープを安全に行う)
         pins_data = [
@@ -1868,6 +1869,10 @@ class MapScreen(Screen):
   <script>
     var segments = {segments_js};
     var pins = {pins_js};
+    var originalBannerText = {banner_js};
+    window.resetBanner = function() {{
+      document.getElementById('banner').innerText = originalBannerText;
+    }};
     var map = L.map('map', {{preferCanvas: true}}).setView({center_js}, 15);
     // キャッシュを使わず常に最新のタイルを取得する
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png?t=' + Date.now(), {{
@@ -2651,12 +2656,13 @@ class MapScreen(Screen):
                 confirm_button = AndroidButton(activity)
                 confirm_button.setText(JString(app.tr("video_zoom_confirm_button")))
                 confirm_button.setTextColor(Color.WHITE)
-                confirm_button.setBackgroundColor(Color.parseColor("#CC2E7D32"))
+                confirm_button.setBackgroundColor(Color.parseColor("#FF2E7D32"))
                 confirm_button.setAllCaps(False)
                 confirm_button.setClickable(True)
                 confirm_button.setFocusable(True)
                 confirm_button.setElevation(dp(8))
                 confirm_button.setTextSize(14)
+                confirm_button.setPadding(dp(20), dp(12), dp(20), dp(12))
 
                 self._zoom_confirm_click_listener = OnClickListener(
                     lambda: Clock.schedule_once(lambda dt: self._confirm_zoom_and_start(speed))
@@ -2664,10 +2670,9 @@ class MapScreen(Screen):
                 confirm_button.setOnClickListener(self._zoom_confirm_click_listener)
 
                 confirm_params = FrameLayoutParams(
-                    FrameLayoutParams.WRAP_CONTENT, dp(48)
+                    FrameLayoutParams.WRAP_CONTENT, FrameLayoutParams.WRAP_CONTENT
                 )
-                confirm_params.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
-                confirm_params.setMargins(0, 0, 0, dp(100))
+                confirm_params.gravity = Gravity.CENTER
                 activity.addContentView(confirm_button, confirm_params)
                 confirm_button.bringToFront()
                 self.video_zoom_confirm_native = confirm_button
@@ -2761,7 +2766,8 @@ class MapScreen(Screen):
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0.3)
 
     def _set_map_capturing_class(self, capturing):
-        """撮影中はLeafletのズームコントロール(+/-)などを非表示にする"""
+        """撮影中はLeafletのズームコントロール(+/-)などを非表示にする。
+        撮影開始時には、ズーム調整のヒント文言が残ったままにならないようバナーも元に戻す"""
         if self.webview is None:
             return
         try:
@@ -2771,6 +2777,8 @@ class MapScreen(Screen):
             JString = autoclass("java.lang.String")
             action = "add" if capturing else "remove"
             js = f"document.body.classList.{action}('capturing');"
+            if capturing:
+                js += " if (window.resetBanner) { window.resetBanner(); }"
 
             @run_on_ui_thread
             def _apply():
@@ -2954,6 +2962,18 @@ class MapScreen(Screen):
             def onPixelCopyFinished(self, copy_result):
                 self.on_done(copy_result)
 
+        class RunnableWrapper(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+            __javacontext__ = "app"
+
+            def __init__(self, callback):
+                super().__init__()
+                self.callback = callback
+
+            @java_method("()V")
+            def run(self):
+                self.callback()
+
         @run_on_ui_thread
         def _capture():
             try:
@@ -2966,44 +2986,61 @@ class MapScreen(Screen):
                     if v is not None:
                         v.setVisibility(View.GONE)
 
-                bitmap = Bitmap.createBitmap(
-                    self._video_width, self._video_height, BitmapConfig.ARGB_8888
-                )
-                location = [0, 0]
-                self.webview.getLocationInWindow(location)
-                rect = Rect(
-                    location[0],
-                    location[1],
-                    location[0] + self._video_width,
-                    location[1] + self._video_height,
-                )
-                handler = Handler(Looper.getMainLooper())
+                decor_view = activity.getWindow().getDecorView()
 
-                def _on_finished(copy_result):
+                def _do_pixelcopy():
                     try:
-                        if copy_result != PixelCopy.SUCCESS:
-                            result["error"] = f"PixelCopyに失敗しました(結果コード: {copy_result})"
-                            return
-                        surface_canvas = self._video_input_surface.lockCanvas(None)
-                        surface_canvas.drawBitmap(bitmap, 0, 0, None)
-                        self._video_input_surface.unlockCanvasAndPost(surface_canvas)
+                        bitmap = Bitmap.createBitmap(
+                            self._video_width, self._video_height, BitmapConfig.ARGB_8888
+                        )
+                        location = [0, 0]
+                        self.webview.getLocationInWindow(location)
+                        rect = Rect(
+                            location[0],
+                            location[1],
+                            location[0] + self._video_width,
+                            location[1] + self._video_height,
+                        )
+                        handler = Handler(Looper.getMainLooper())
+
+                        def _on_finished(copy_result):
+                            try:
+                                if copy_result != PixelCopy.SUCCESS:
+                                    result["error"] = (
+                                        f"PixelCopyに失敗しました(結果コード: {copy_result})"
+                                    )
+                                    return
+                                surface_canvas = self._video_input_surface.lockCanvas(None)
+                                surface_canvas.drawBitmap(bitmap, 0, 0, None)
+                                self._video_input_surface.unlockCanvasAndPost(surface_canvas)
+                            except Exception as e:
+                                result["error"] = str(e)
+                            finally:
+                                bitmap.recycle()
+                                for v in progress_views:
+                                    if v is not None:
+                                        v.setVisibility(View.VISIBLE)
+                                done_event.set()
+
+                        listener = PixelCopyListener(_on_finished)
+                        self._pending_pixelcopy_listener = listener  # ガベージコレクション対策
+
+                        PixelCopy.request(activity.getWindow(), rect, bitmap, listener, handler)
                     except Exception as e:
-                        result["error"] = str(e)
-                    finally:
-                        bitmap.recycle()
                         for v in progress_views:
                             if v is not None:
                                 v.setVisibility(View.VISIBLE)
+                        result["error"] = str(e)
                         done_event.set()
 
-                listener = PixelCopyListener(_on_finished)
-                self._pending_pixelcopy_listener = listener  # ガベージコレクション対策
-
-                PixelCopy.request(activity.getWindow(), rect, bitmap, listener, handler)
+                # setVisibility(GONE)が実際に画面へ反映される(1回分の描画サイクルが
+                # 経過する)のを待ってから撮影する(二重postでAndroidの描画1周分を確実に待つ)
+                inner_runnable = RunnableWrapper(_do_pixelcopy)
+                self._pending_capture_runnable_inner = inner_runnable  # GC対策
+                outer_runnable = RunnableWrapper(lambda: decor_view.post(inner_runnable))
+                self._pending_capture_runnable_outer = outer_runnable  # GC対策
+                decor_view.post(outer_runnable)
             except Exception as e:
-                for v in progress_views:
-                    if v is not None:
-                        v.setVisibility(View.VISIBLE)
                 result["error"] = str(e)
                 done_event.set()
 
