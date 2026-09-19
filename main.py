@@ -201,13 +201,15 @@ TRANSLATIONS = {
         "map_add_pin_button": "+ ピン",
         "map_pin_getting_location": "地図の中心位置を取得中...",
         "map_confirm_pin_button": "ここに追加",
-        "save_video_button": "🎥",
+        "save_video_button": "ダウンロード",
         "video_speed_dialog_title": "動画の再生速度を選択",
         "video_capturing": "動画を作成中... {progress}%",
         "video_capture_done": "動画の書き出しが完了しました。保存先を選択してください",
         "video_save_success": "動画を保存しました:\n{path}",
         "video_save_failed": "動画の保存に失敗しました: {error}",
         "video_no_data": "走行記録がないため動画を作成できません",
+        "video_zoom_picker_hint": "地図の+/-で拡大縮小を調整できます。準備ができたら下のボタンを押してください",
+        "video_zoom_confirm_button": "この倍率で作成する",
         "video_cancelled": "動画の作成をキャンセルしました",
         "map_pin_drag_hint": "ピンをドラッグして位置を調整し、「ここに追加」をタップしてください",
     },
@@ -290,13 +292,15 @@ TRANSLATIONS = {
         "map_add_pin_button": "+ Pin",
         "map_pin_getting_location": "Getting map center...",
         "map_confirm_pin_button": "Place Here",
-        "save_video_button": "🎥",
+        "save_video_button": "Download",
         "video_speed_dialog_title": "Select video playback speed",
         "video_capturing": "Creating video... {progress}%",
         "video_capture_done": "Video encoding complete. Please choose where to save it",
         "video_save_success": "Video saved to:\n{path}",
         "video_save_failed": "Failed to save video: {error}",
         "video_no_data": "No route data available to create a video",
+        "video_zoom_picker_hint": "Use the map's +/- to adjust zoom, then tap the button below when ready",
+        "video_zoom_confirm_button": "Create at this zoom",
         "video_cancelled": "Video creation cancelled",
         "map_pin_drag_hint": "Drag the pin to adjust its position, then tap \"Place Here\"",
     },
@@ -1713,6 +1717,7 @@ class MapScreen(Screen):
         self.video_button_native = None
         self.video_progress_native = None
         self.video_cancel_button_native = None
+        self.video_zoom_confirm_native = None
         self.pin_mode = False
         self.build_ui()
         self.show_map()
@@ -1810,6 +1815,7 @@ class MapScreen(Screen):
       background: rgba(0,0,0,0.6); color: white; padding: 8px;
       font-size: 14px; text-align: left;
     }}
+    body.capturing .leaflet-control-zoom {{ display: none !important; }}
     .pin-popup img {{ max-width: 200px; max-height: 200px; display: block; margin-bottom: 6px; }}
     .pin-popup p {{ margin: 0; white-space: pre-wrap; }}
     #playback-info {{
@@ -2243,7 +2249,7 @@ class MapScreen(Screen):
                 self.pin_button_native = pin_button
                 self._map_center_callback_class = MapCenterCallback
 
-                # 地図の右端(縦中央)に配置する「動画として保存」ボタン
+                # 地図の右上(バナーの文字と重ならない位置)に配置する「ダウンロード」ボタン
                 video_button = AndroidButton(activity)
                 video_button.setText(JString(app.tr("save_video_button")))
                 video_button.setTextColor(Color.WHITE)
@@ -2252,17 +2258,19 @@ class MapScreen(Screen):
                 video_button.setClickable(True)
                 video_button.setFocusable(True)
                 video_button.setElevation(dp(8))
-                video_button.setTextSize(11)
-                video_button.setPadding(dp(4), dp(4), dp(4), dp(4))
+                video_button.setTextSize(12)
+                video_button.setPadding(dp(10), dp(4), dp(10), dp(4))
 
                 self._video_click_listener = OnClickListener(
                     lambda: Clock.schedule_once(lambda dt: self._show_video_speed_dialog())
                 )
                 video_button.setOnClickListener(self._video_click_listener)
 
-                video_params = FrameLayoutParams(dp(64), dp(64))
-                video_params.gravity = Gravity.RIGHT | Gravity.CENTER_VERTICAL
-                video_params.setMargins(0, 0, dp(8), 0)
+                video_params = FrameLayoutParams(
+                    FrameLayoutParams.WRAP_CONTENT, dp(40)
+                )
+                video_params.gravity = Gravity.TOP | Gravity.RIGHT
+                video_params.setMargins(0, dp(50), dp(8), 0)
                 activity.addContentView(video_button, video_params)
                 video_button.bringToFront()
                 self.video_button_native = video_button
@@ -2582,7 +2590,7 @@ class MapScreen(Screen):
 
             def on_choice(which):
                 speed = speeds[which]
-                Clock.schedule_once(lambda dt: self._start_video_capture(speed))
+                Clock.schedule_once(lambda dt: self._show_zoom_picker(speed))
 
             listener = DialogClickListener(on_choice)
             self._video_dialog_listener = listener  # ガベージコレクション対策で参照を保持
@@ -2603,6 +2611,93 @@ class MapScreen(Screen):
         except Exception as e:
             print(f"[DEBUG] 速度選択ダイアログの表示に失敗: {e}")
             self._set_banner_text(app.tr("video_save_failed", error=e))
+
+    def _show_zoom_picker(self, speed):
+        """動画にする地図の縮尺を、既存の+/-ズームボタンを使って調整できるようにする
+        (何もしなければ現在の縮尺のまま「この倍率で作成する」を押して開始できる)"""
+        app = App.get_running_app()
+        self._set_banner_text(app.tr("video_zoom_picker_hint"))
+        try:
+            from jnius import autoclass, PythonJavaClass, java_method
+            from android.runnable import run_on_ui_thread
+
+            AndroidButton = autoclass("android.widget.Button")
+            FrameLayoutParams = autoclass("android.widget.FrameLayout$LayoutParams")
+            Gravity = autoclass("android.view.Gravity")
+            Color = autoclass("android.graphics.Color")
+            JString = autoclass("java.lang.String")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            activity = PythonActivity.mActivity
+
+            class OnClickListener(PythonJavaClass):
+                __javainterfaces__ = ["android/view/View$OnClickListener"]
+                __javacontext__ = "app"
+
+                def __init__(self, callback):
+                    super().__init__()
+                    self.callback = callback
+
+                @java_method("(Landroid/view/View;)V")
+                def onClick(self, view):
+                    self.callback()
+
+            density = activity.getResources().getDisplayMetrics().density
+
+            def dp(v):
+                return int(v * density)
+
+            @run_on_ui_thread
+            def _create():
+                confirm_button = AndroidButton(activity)
+                confirm_button.setText(JString(app.tr("video_zoom_confirm_button")))
+                confirm_button.setTextColor(Color.WHITE)
+                confirm_button.setBackgroundColor(Color.parseColor("#CC2E7D32"))
+                confirm_button.setAllCaps(False)
+                confirm_button.setClickable(True)
+                confirm_button.setFocusable(True)
+                confirm_button.setElevation(dp(8))
+                confirm_button.setTextSize(14)
+
+                self._zoom_confirm_click_listener = OnClickListener(
+                    lambda: Clock.schedule_once(lambda dt: self._confirm_zoom_and_start(speed))
+                )
+                confirm_button.setOnClickListener(self._zoom_confirm_click_listener)
+
+                confirm_params = FrameLayoutParams(
+                    FrameLayoutParams.WRAP_CONTENT, dp(48)
+                )
+                confirm_params.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL
+                confirm_params.setMargins(0, 0, 0, dp(100))
+                activity.addContentView(confirm_button, confirm_params)
+                confirm_button.bringToFront()
+                self.video_zoom_confirm_native = confirm_button
+
+            _create()
+        except Exception as e:
+            print(f"[DEBUG] ズーム調整ボタンの表示に失敗: {e}")
+            # 失敗した場合は調整をスキップして、そのまま現在の縮尺で開始する
+            self._start_video_capture(speed)
+
+    def _confirm_zoom_and_start(self, speed):
+        try:
+            from jnius import autoclass, cast
+            from android.runnable import run_on_ui_thread
+
+            ViewGroup = autoclass("android.view.ViewGroup")
+            button = getattr(self, "video_zoom_confirm_native", None)
+
+            @run_on_ui_thread
+            def _remove():
+                if button is not None:
+                    parent = button.getParent()
+                    if parent is not None:
+                        cast(ViewGroup, parent).removeView(button)
+
+            _remove()
+        except Exception as e:
+            print(f"[DEBUG] ズーム調整ボタンの削除に失敗: {e}")
+        self.video_zoom_confirm_native = None
+        self._start_video_capture(speed)
 
     def _start_video_capture(self, speed):
         app = App.get_running_app()
@@ -2650,6 +2745,7 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(False)
         self._show_video_progress_ui()
+        self._set_map_capturing_class(True)
 
         try:
             self._init_video_encoder()
@@ -2658,10 +2754,32 @@ class MapScreen(Screen):
             self._video_capturing = False
             self._set_map_controls_visible(True)
             self._hide_video_progress_ui()
+            self._set_map_capturing_class(False)
             self._set_banner_text(app.tr("video_save_failed", error=e))
             return
 
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0.3)
+
+    def _set_map_capturing_class(self, capturing):
+        """撮影中はLeafletのズームコントロール(+/-)などを非表示にする"""
+        if self.webview is None:
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+            action = "add" if capturing else "remove"
+            js = f"document.body.classList.{action}('capturing');"
+
+            @run_on_ui_thread
+            def _apply():
+                if self.webview is not None:
+                    self.webview.evaluateJavascript(JString(js), None)
+
+            _apply()
+        except Exception as e:
+            print(f"[DEBUG] 撮影用クラスの切替に失敗: {e}")
 
     def _init_video_encoder(self):
         from jnius import autoclass
@@ -2839,6 +2957,15 @@ class MapScreen(Screen):
         @run_on_ui_thread
         def _capture():
             try:
+                View = autoclass("android.view.View")
+                progress_views = [
+                    getattr(self, "video_progress_native", None),
+                    getattr(self, "video_cancel_button_native", None),
+                ]
+                for v in progress_views:
+                    if v is not None:
+                        v.setVisibility(View.GONE)
+
                 bitmap = Bitmap.createBitmap(
                     self._video_width, self._video_height, BitmapConfig.ARGB_8888
                 )
@@ -2864,6 +2991,9 @@ class MapScreen(Screen):
                         result["error"] = str(e)
                     finally:
                         bitmap.recycle()
+                        for v in progress_views:
+                            if v is not None:
+                                v.setVisibility(View.VISIBLE)
                         done_event.set()
 
                 listener = PixelCopyListener(_on_finished)
@@ -2871,6 +3001,9 @@ class MapScreen(Screen):
 
                 PixelCopy.request(activity.getWindow(), rect, bitmap, listener, handler)
             except Exception as e:
+                for v in progress_views:
+                    if v is not None:
+                        v.setVisibility(View.VISIBLE)
                 result["error"] = str(e)
                 done_event.set()
 
@@ -2948,6 +3081,7 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_map_capturing_class(False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_capture_done"))
         self._save_video_via_saf()
@@ -2969,6 +3103,7 @@ class MapScreen(Screen):
             pass
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_map_capturing_class(False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_save_failed", error=error_message))
 
@@ -3012,6 +3147,7 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
+        self._set_map_capturing_class(False)
         self._video_capturing = False
         self._video_cancel_requested = False
         self._set_banner_text(app.tr("video_cancelled"))
@@ -3075,6 +3211,7 @@ class MapScreen(Screen):
             getattr(self, "video_button_native", None),
             getattr(self, "video_progress_native", None),
             getattr(self, "video_cancel_button_native", None),
+            getattr(self, "video_zoom_confirm_native", None),
         ]
         if any(v is not None for v in views_to_remove):
             try:
@@ -3100,6 +3237,7 @@ class MapScreen(Screen):
             self.video_button_native = None
             self.video_progress_native = None
             self.video_cancel_button_native = None
+            self.video_zoom_confirm_native = None
 
     def go_back(self, instance):
         self.manager.current = "route_list"
