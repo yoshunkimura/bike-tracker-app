@@ -2650,9 +2650,6 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(False)
         self._show_video_progress_ui()
-        # Canvas描画のルート線がハードウェア描画では正しくキャプチャされないため、
-        # 撮影中だけWebViewをソフトウェア描画モードに切り替える
-        self._set_webview_layer_type(software=True)
 
         try:
             self._init_video_encoder()
@@ -2661,32 +2658,10 @@ class MapScreen(Screen):
             self._video_capturing = False
             self._set_map_controls_visible(True)
             self._hide_video_progress_ui()
-            self._set_webview_layer_type(software=False)
             self._set_banner_text(app.tr("video_save_failed", error=e))
             return
 
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0.3)
-
-    def _set_webview_layer_type(self, software):
-        """撮影中はWebViewをソフトウェア描画にして、Canvas等の内容も
-        確実にBitmapへキャプチャできるようにする(撮影後は元(ハードウェア)に戻す)"""
-        if self.webview is None:
-            return
-        try:
-            from jnius import autoclass
-            from android.runnable import run_on_ui_thread
-
-            View = autoclass("android.view.View")
-            layer_type = View.LAYER_TYPE_SOFTWARE if software else View.LAYER_TYPE_HARDWARE
-
-            @run_on_ui_thread
-            def _apply():
-                if self.webview is not None:
-                    self.webview.setLayerType(layer_type, None)
-
-            _apply()
-        except Exception as e:
-            print(f"[DEBUG] WebViewの描画モード切替に失敗: {e}")
 
     def _init_video_encoder(self):
         from jnius import autoclass
@@ -2833,36 +2808,73 @@ class MapScreen(Screen):
         Clock.schedule_once(lambda dt: self._capture_next_frame(), 0)
 
     def _draw_frame_to_encoder(self):
-        from jnius import autoclass
+        from jnius import autoclass, PythonJavaClass, java_method
         from android.runnable import run_on_ui_thread
         import threading
 
         Bitmap = autoclass("android.graphics.Bitmap")
         BitmapConfig = autoclass("android.graphics.Bitmap$Config")
-        AndroidCanvas = autoclass("android.graphics.Canvas")
+        Rect = autoclass("android.graphics.Rect")
+        PixelCopy = autoclass("android.view.PixelCopy")
+        Handler = autoclass("android.os.Handler")
+        Looper = autoclass("android.os.Looper")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
 
         done_event = threading.Event()
         result = {}
 
+        class PixelCopyListener(PythonJavaClass):
+            __javainterfaces__ = ["android/view/PixelCopy$OnPixelCopyFinishedListener"]
+            __javacontext__ = "app"
+
+            def __init__(self, on_done):
+                super().__init__()
+                self.on_done = on_done
+
+            @java_method("(I)V")
+            def onPixelCopyFinished(self, copy_result):
+                self.on_done(copy_result)
+
         @run_on_ui_thread
-        def _draw():
+        def _capture():
             try:
                 bitmap = Bitmap.createBitmap(
                     self._video_width, self._video_height, BitmapConfig.ARGB_8888
                 )
-                canvas = AndroidCanvas(bitmap)
-                self.webview.draw(canvas)
+                location = [0, 0]
+                self.webview.getLocationInWindow(location)
+                rect = Rect(
+                    location[0],
+                    location[1],
+                    location[0] + self._video_width,
+                    location[1] + self._video_height,
+                )
+                handler = Handler(Looper.getMainLooper())
 
-                surface_canvas = self._video_input_surface.lockCanvas(None)
-                surface_canvas.drawBitmap(bitmap, 0, 0, None)
-                self._video_input_surface.unlockCanvasAndPost(surface_canvas)
-                bitmap.recycle()
+                def _on_finished(copy_result):
+                    try:
+                        if copy_result != PixelCopy.SUCCESS:
+                            result["error"] = f"PixelCopyに失敗しました(結果コード: {copy_result})"
+                            return
+                        surface_canvas = self._video_input_surface.lockCanvas(None)
+                        surface_canvas.drawBitmap(bitmap, 0, 0, None)
+                        self._video_input_surface.unlockCanvasAndPost(surface_canvas)
+                    except Exception as e:
+                        result["error"] = str(e)
+                    finally:
+                        bitmap.recycle()
+                        done_event.set()
+
+                listener = PixelCopyListener(_on_finished)
+                self._pending_pixelcopy_listener = listener  # ガベージコレクション対策
+
+                PixelCopy.request(activity.getWindow(), rect, bitmap, listener, handler)
             except Exception as e:
                 result["error"] = str(e)
-            finally:
                 done_event.set()
 
-        _draw()
+        _capture()
         if not done_event.wait(timeout=5.0):
             raise RuntimeError("フレーム描画がタイムアウトしました")
         if result.get("error"):
@@ -2936,7 +2948,6 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
-        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_capture_done"))
         self._save_video_via_saf()
@@ -2958,7 +2969,6 @@ class MapScreen(Screen):
             pass
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
-        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._set_banner_text(app.tr("video_save_failed", error=error_message))
 
@@ -3002,7 +3012,6 @@ class MapScreen(Screen):
 
         self._set_map_controls_visible(True)
         self._hide_video_progress_ui()
-        self._set_webview_layer_type(software=False)
         self._video_capturing = False
         self._video_cancel_requested = False
         self._set_banner_text(app.tr("video_cancelled"))
