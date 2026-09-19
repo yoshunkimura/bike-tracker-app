@@ -1862,7 +1862,7 @@ class MapScreen(Screen):
   <script>
     var segments = {segments_js};
     var pins = {pins_js};
-    var map = L.map('map').setView({center_js}, 15);
+    var map = L.map('map', {{preferCanvas: true}}).setView({center_js}, 15);
     // キャッシュを使わず常に最新のタイルを取得する
     L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png?t=' + Date.now(), {{
       attribution: '&copy; OpenStreetMap contributors'
