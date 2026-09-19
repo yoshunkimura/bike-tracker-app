@@ -1817,6 +1817,7 @@ class MapScreen(Screen):
       font-size: 14px; text-align: left;
     }}
     body.capturing .leaflet-control-zoom {{ display: none !important; }}
+    .leaflet-top.leaflet-left {{ top: 56px; }}
     .pin-popup img {{ max-width: 200px; max-height: 200px; display: block; margin-bottom: 6px; }}
     .pin-popup p {{ margin: 0; white-space: pre-wrap; }}
     #playback-info {{
@@ -2390,6 +2391,26 @@ class MapScreen(Screen):
             _apply()
         except Exception as e:
             print(f"[DEBUG] バナー表示の更新に失敗: {e}")
+
+    def _reset_banner_to_route_info(self):
+        """バナーを元のルート情報(プロファイル名・日付・距離)表示に戻す"""
+        if self.webview is None:
+            return
+        try:
+            from jnius import autoclass
+            from android.runnable import run_on_ui_thread
+
+            JString = autoclass("java.lang.String")
+
+            @run_on_ui_thread
+            def _apply():
+                self.webview.evaluateJavascript(
+                    JString("if (window.resetBanner) { window.resetBanner(); }"), None
+                )
+
+            _apply()
+        except Exception as e:
+            print(f"[DEBUG] バナー表示のリセットに失敗: {e}")
 
     def _set_map_controls_visible(self, visible):
         """ネイティブボタンと再生コントロールの表示・非表示を切り替える"""
@@ -3229,6 +3250,7 @@ class MapScreen(Screen):
                     display_path = uri.toString()
                     message = app.tr("video_save_success", path=display_path)
                     Clock.schedule_once(lambda dt: self._set_banner_text(message))
+                    Clock.schedule_once(lambda dt: self._reset_banner_to_route_info(), 4)
                 except Exception as e:
                     print(f"[DEBUG] 動画の保存に失敗: {e}")
                     message = app.tr("video_save_failed", error=e)
